@@ -1,0 +1,258 @@
+{
+  "info": {
+    "_postman_id": "aero-morning-api",
+    "name": "Aero Morning News Extractor API",
+    "description": "Complete API collection for email extraction and WordPress integration",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "WordPress Synchronization",
+      "item": [
+        {
+          "name": "Sync WordPress Categories & Tags",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sync-wordpress",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "sync-wordpress"
+              ]
+            },
+            "description": "Fetches latest categories and tags from WordPress and updates database"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Email Processing",
+      "item": [
+        {
+          "name": "Process Unread Emails",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/process-emails",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "process-emails"
+              ]
+            },
+            "description": "Fetches unread emails, extracts content, generates metadata, and saves to database"
+          }
+        }
+      ]
+    },
+    {
+      "name": "News Management",
+      "item": [
+        {
+          "name": "Get Pending News",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/news/pending?page=1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "news",
+                "pending"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "per_page",
+                  "value": "15",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Returns paginated list of news awaiting publication"
+          }
+        },
+        {
+          "name": "Get News by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/news/1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "news",
+                "1"
+              ]
+            },
+            "description": "Returns a single news article with all details"
+          }
+        },
+        {
+          "name": "Update News Status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/news/1/status/2",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "news",
+                "1",
+                "status",
+                "2"
+              ]
+            },
+            "description": "Update the publication status of a news article (0=pending, 1=syncing, 2=synced)"
+          }
+        },
+        {
+          "name": "Preview News",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/news/1/preview",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "news",
+                "1",
+                "preview"
+              ]
+            },
+            "description": "Get formatted preview of news as it will appear in WordPress"
+          }
+        }
+      ]
+    },
+    {
+      "name": "WordPress Posting",
+      "item": [
+        {
+          "name": "Post Single News to WordPress",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"wordpress_admin\",\n  \"password\": \"app_specific_password\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/news/1/post-to-wordpress",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "news",
+                "1",
+                "post-to-wordpress"
+              ]
+            },
+            "description": "Publish a news article to WordPress with authentication"
+          }
+        },
+        {
+          "name": "Bulk Post News to WordPress",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"news_ids\": [1, 2, 3, 5],\n  \"username\": \"wordpress_admin\",\n  \"password\": \"app_specific_password\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/news/bulk-post-to-wordpress",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "news",
+                "bulk-post-to-wordpress"
+              ]
+            },
+            "description": "Publish multiple news articles at once to WordPress"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Statistics",
+      "item": [
+        {
+          "name": "Get Statistics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/stats",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "stats"
+              ]
+            },
+            "description": "Get overview statistics of all processed news"
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+<?php
+
+return [
+    'wordpress' => [
+        'fr_url' => env('WORDPRESS_FR_URL', 'https://preprod.aeromorning.com'),
+        'en_url' => env('WORDPRESS_EN_URL', 'https://preprod.aeromorning.com/en'),
+    ],
+
+    'imap' => [
+        'host' => env('IMAP_HOST'),
+        'port' => env('IMAP_PORT', 993),
+        'username' => env('IMAP_USERNAME'),
+        'password' => env('IMAP_PASSWORD'),
+        'encryption' => env('IMAP_ENCRYPTION', 'ssl'),
+    ],
+
+    'openai' => [
+        'api_key' => env('OPENAI_API_KEY'),
+        'model' => env('OPENAI_MODEL', 'gpt-4-turbo-preview'),
+    ],
+
+    'image' => [
+        'max_size' => env('IMAGE_MAX_SIZE', 1000000),
+        'width' => env('IMAGE_WIDTH', 700),
+        'height' => env('IMAGE_HEIGHT', 400),
+        'background_color' => env('IMAGE_BACKGROUND_COLOR', '#005A8C'),
+        'format' => env('IMAGE_FORMAT', 'jpg'),
+        'quality' => env('IMAGE_QUALITY', 85),
+    ],
+];

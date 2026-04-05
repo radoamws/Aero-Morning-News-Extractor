@@ -1,0 +1,19 @@
+{
+  "name": "gestion-news",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "@pinia/nuxt": "latest",
+    "gestion-news": "file:",
+    "nuxt": "^3.13.2",
+    "pinia": "^3.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10"
+  }
+}
