@@ -4,6 +4,7 @@ namespace App\Services;
 
 use OpenAI\Client;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class OpenAIService
 {
@@ -19,65 +20,8 @@ class OpenAIService
      */
     public function generateFrenchTitle(string $emailContent): ?string
     {
-        $prompt = "Task: Extract a SEO-optimized news title in FRENCH from an email containing aviation news.
-
---------------------------------------------------
-
-GOAL:
-Generate a clean meta title suitable for WordPress SEO usage (Yoast / RankMath), based strictly on the email content.
-
---------------------------------------------------
-
-REQUIREMENTS:
-- Output language: FRENCH (do NOT translate if already French content exists)
-- Length: 1 to 53 characters maximum (STRICT)
-- Must represent the main news topic accurately
-- Must be SEO-friendly and readable
-
---------------------------------------------------
-
-ANALYSIS INSTRUCTIONS:
-Carefully analyze the full email content, including:
-- Main aviation news topic
-- Key facts (airline, aircraft, airport, event)
-- Technical or operational details
-- Timeline or important implications
-
-Ignore:
-- Email headers (FW, RE, FWD, CC, TR, CP)
-- Signatures
-- Greetings and closing text
-- Quoted replies or forwarded chains
-- Metadata or unrelated content
-
---------------------------------------------------
-
-TITLE GENERATION RULES:
-- Extract or rewrite a meaningful headline
-- If the original title is too long (>53 characters), intelligently shorten it without losing meaning
-- If no clear title exists, create a concise SEO title based on the main subject
-- Prioritize clarity, relevance, and search intent
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL):
-- Remove invalid or unsafe characters
-- Remove brackets [ ], unnecessary punctuation, or email artifacts
-- Ensure output is safe for JSON and WordPress REST API
-- Preserve valid text formatting only (no unnecessary HTML unless already clean and meaningful)
-
---------------------------------------------------
-
-OUTPUT RULES:
-- Return ONLY the final title
-- No explanations
-- No JSON
-- No formatting tags unless naturally part of clean HTML text
-
-EMAIL CONTENT:
-$emailContent";
-
-        return $this->callOpenAI($prompt);
+        $prompt = $this->buildTitlePrompt($emailContent, 'FR');
+        return $this->sanitizeTitle($this->callOpenAI($prompt, 80), $emailContent, 'FR');
     }
 
     /**
@@ -85,65 +29,8 @@ $emailContent";
      */
     public function generateEnglishTitle(string $emailContent): ?string
     {
-        $prompt = "Task: Extract a SEO-optimized news title in ENGLISH from an email containing aviation news.
-
---------------------------------------------------
-
-GOAL:
-Generate a clean meta title suitable for WordPress SEO usage (Yoast / RankMath), based strictly on the email content.
-
---------------------------------------------------
-
-REQUIREMENTS:
-- Output language: ENGLISH (do NOT translate if already ENGLISH content exists)
-- Length: 1 to 53 characters maximum (STRICT)
-- Must represent the main news topic accurately
-- Must be SEO-friendly and readable
-
---------------------------------------------------
-
-ANALYSIS INSTRUCTIONS:
-Carefully analyze the full email content, including:
-- Main aviation news topic
-- Key facts (airline, aircraft, airport, event)
-- Technical or operational details
-- Timeline or important implications
-
-Ignore:
-- Email headers (FW, RE, FWD, CC, TR, CP)
-- Signatures
-- Greetings and closing text
-- Quoted replies or forwarded chains
-- Metadata or unrelated content
-
---------------------------------------------------
-
-TITLE GENERATION RULES:
-- Extract or rewrite a meaningful headline
-- If the original title is too long (>53 characters), intelligently shorten it without losing meaning
-- If no clear title exists, create a concise SEO title based on the main subject
-- Prioritize clarity, relevance, and search intent
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL):
-- Remove invalid or unsafe characters
-- Remove brackets [ ], unnecessary punctuation, or email artifacts
-- Ensure output is safe for JSON and WordPress REST API
-- Preserve valid text formatting only (no unnecessary HTML unless already clean and meaningful)
-
---------------------------------------------------
-
-OUTPUT RULES:
-- Return ONLY the final title
-- No explanations
-- No JSON
-- No formatting tags unless naturally part of clean HTML text
-
-EMAIL CONTENT:
-$emailContent";
-
-        return $this->callOpenAI($prompt);
+        $prompt = $this->buildTitlePrompt($emailContent, 'EN');
+        return $this->sanitizeTitle($this->callOpenAI($prompt, 80), $emailContent, 'EN');
     }
 
     /**
@@ -151,104 +38,8 @@ $emailContent";
      */
     public function generateFrenchContent(string $emailContent, string $titleFr): ?string
     {
-        $prompt = "Task: Extract the main aviation news article content in CLEAN HTML (FRENCH) from an email.
-
---------------------------------------------------
-
-GOAL:
-Generate a structured, WordPress-ready HTML article from the email content.
-
-Language: FRENCH (do NOT translate if already in French)
-
-Output: STRICTLY HTML only (no JSON, no explanations)
-
---------------------------------------------------
-
-CORE INSTRUCTIONS:
-
-Extract ONLY the main article content from the email while preserving its structure and meaning.
-
---------------------------------------------------
-
-TITLE HANDLING RULE:
-- If the provided FR title (TITRE_FR) exceeds 53 characters,
-insert it as:
-<h2>Title</h2>
-at the very beginning of the article content.
-
-TITRE_FR: $titleFr
-
---------------------------------------------------
-
-HTML PRESERVATION RULES:
-Keep and preserve:
-- <p> paragraphs
-- <a> links
-- <img> images
-- <ul>, <li> lists
-- <h2> sections when relevant
-
-Ensure clean, semantic structure suitable for WordPress rendering.
-
---------------------------------------------------
-
-REMOVE COMPLETELY:
-- Email headers (FW, RE, FWD, CC, TR, CP)
-- Greetings and signatures
-- Contact details (emails, phone numbers, addresses)
-- Social media links unrelated to the article
-- Email layout tables and formatting-only structures
-- Logos, headers, and footers not part of the article
-- Tracking content or boilerplate text
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL FOR WORDPRESS):
-- Remove all invalid or unsafe characters
-- Ensure output is safe for JSON POST and WordPress REST API
-- Escape or remove:
-  * control characters
-  * broken Unicode
-  * unescaped quotes
-  * malformed symbols
-
---------------------------------------------------
-
-CONTENT INTEGRITY RULES:
-- Do NOT summarize
-- Do NOT rewrite
-- Do NOT translate
-- Preserve full article depth and all factual content
-- Include all available paragraphs, details, and embedded media
-
---------------------------------------------------
-
-SOURCE CLEANING:
-Remove any occurrence of:
-- \"/PRNewswire/\"
-- \"BUSINESS WIRE\"
-- \"BUSINESSWIRE\"
-- \"/<xxx>/\" (dynamic placeholder patterns)
-
---------------------------------------------------
-
-SOURCE EXTRACTION RULE:
-If no explicit source is mentioned in the article:
-- Search within the email content for the original source name
-- Append at the END of the article in this format:
-
-Source: <source_name>
-
---------------------------------------------------
-
-OUTPUT RULE:
-Return ONLY clean HTML content.
-No explanations, no metadata, no JSON.
-
-EMAIL CONTENT:
-$emailContent";
-
-        return $this->callOpenAI($prompt);
+                $prompt = $this->buildContentPrompt($emailContent, $titleFr, 'FR');
+                return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleFr, 'FR');
     }
 
     /**
@@ -256,104 +47,8 @@ $emailContent";
      */
     public function generateEnglishContent(string $emailContent, string $titleEn): ?string
     {
-        $prompt = "Task: Extract the main aviation news article content in CLEAN HTML (ENGLISH) from an email.
-
---------------------------------------------------
-
-GOAL:
-Generate a structured, WordPress-ready HTML article from the email content.
-
-Language: ENGLISH (do NOT translate if already in ENGLISH)
-
-Output: STRICTLY HTML only (no JSON, no explanations)
-
---------------------------------------------------
-
-CORE INSTRUCTIONS:
-
-Extract ONLY the main article content from the email while preserving its structure and meaning.
-
---------------------------------------------------
-
-TITLE HANDLING RULE:
-- If the provided EN title (TITRE_EN) exceeds 53 characters,
-insert it as:
-<h2>Title</h2>
-at the very beginning of the article content.
-
-TITRE_EN: $titleEn
-
---------------------------------------------------
-
-HTML PRESERVATION RULES:
-Keep and preserve:
-- <p> paragraphs
-- <a> links
-- <img> images
-- <ul>, <li> lists
-- <h2> sections when relevant
-
-Ensure clean, semantic structure suitable for WordPress rendering.
-
---------------------------------------------------
-
-REMOVE COMPLETELY:
-- Email headers (FW, RE, FWD, CC, TR, CP)
-- Greetings and signatures
-- Contact details (emails, phone numbers, addresses)
-- Social media links unrelated to the article
-- Email layout tables and formatting-only structures
-- Logos, headers, and footers not part of the article
-- Tracking content or boilerplate text
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL FOR WORDPRESS):
-- Remove all invalid or unsafe characters
-- Ensure output is safe for JSON POST and WordPress REST API
-- Escape or remove:
-  * control characters
-  * broken Unicode
-  * unescaped quotes
-  * malformed symbols
-
---------------------------------------------------
-
-CONTENT INTEGRITY RULES:
-- Do NOT summarize
-- Do NOT rewrite
-- Do NOT translate
-- Preserve full article depth and all factual content
-- Include all available paragraphs, details, and embedded media
-
---------------------------------------------------
-
-SOURCE CLEANING:
-Remove any occurrence of:
-- \"/PRNewswire/\"
-- \"BUSINESS WIRE\"
-- \"BUSINESSWIRE\"
-- \"/<xxx>/\" (dynamic placeholder patterns)
-
---------------------------------------------------
-
-SOURCE EXTRACTION RULE:
-If no explicit source is mentioned in the article:
-- Search within the email content for the original source name
-- Append at the END of the article in this format:
-
-Source: <source_name>
-
---------------------------------------------------
-
-OUTPUT RULE:
-Return ONLY clean HTML content.
-No explanations, no metadata, no JSON.
-
-EMAIL CONTENT:
-$emailContent";
-
-        return $this->callOpenAI($prompt);
+                $prompt = $this->buildContentPrompt($emailContent, $titleEn, 'EN');
+                return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleEn, 'EN');
     }
 
     /**
@@ -361,63 +56,8 @@ $emailContent";
      */
     public function generateFrenchMetaDescription(string $contentFr): ?string
     {
-        $prompt = "Task: Generate an SEO meta description in FRENCH based on a portion of the French news content.
-
---------------------------------------------------
-
-GOAL:
-Create a clean, engaging meta description suitable for WordPress SEO (Yoast / RankMath).
-
---------------------------------------------------
-
-REQUIREMENTS:
-- Output language: FRENCH
-- Length: STRICTLY between 106 and 141 characters (including spaces)
-- Output type: plain text only (NO HTML, NO JSON)
-
---------------------------------------------------
-
-CONTENT INSTRUCTIONS:
-- Extract key information from the provided news content
-- Focus on:
-  * main aviation topic
-  * key fact or event
-  * relevant entities (airline, aircraft, airport, manufacturer)
-
-- Make it clear, concise, and SEO-friendly
-- Must encourage user engagement (click intent)
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL):
-Ensure the output is safe for:
-- JSON POST requests
-- WordPress REST API
-
-Therefore:
-- Remove or replace all invalid characters
-- Remove control characters
-- Fix or remove broken Unicode
-- Remove unescaped quotes or malformed symbols
-
---------------------------------------------------
-
-STRICT RULES:
-- Do NOT include HTML
-- Do NOT include JSON
-- Do NOT summarize excessively (keep factual accuracy)
-- Do NOT invent information not present in the source
-- Do NOT exceed or go below the character limits
-
---------------------------------------------------
-
-OUTPUT RULE:
-Return ONLY the final meta description as plain text.
-
-CONTENT:
-$contentFr";
-
-        return $this->callOpenAI($prompt);
+                $prompt = $this->buildMetaDescriptionPrompt($contentFr, 'FR');
+                return $this->sanitizeMetaDescription($this->callOpenAI($prompt, 120), $contentFr, 'FR');
     }
 
     /**
@@ -425,63 +65,8 @@ $contentFr";
      */
     public function generateEnglishMetaDescription(string $contentEn): ?string
     {
-        $prompt = "Task: Generate an SEO meta description in ENGLISH based on a portion of the ENGLISH news content.
-
---------------------------------------------------
-
-GOAL:
-Create a clean, engaging meta description suitable for WordPress SEO (Yoast / RankMath).
-
---------------------------------------------------
-
-REQUIREMENTS:
-- Output language: ENGLISH
-- Length: STRICTLY between 106 and 141 characters (including spaces)
-- Output type: plain text only (NO HTML, NO JSON)
-
---------------------------------------------------
-
-CONTENT INSTRUCTIONS:
-- Extract key information from the provided news content
-- Focus on:
-  * main aviation topic
-  * key fact or event
-  * relevant entities (airline, aircraft, airport, manufacturer)
-
-- Make it clear, concise, and SEO-friendly
-- Must encourage user engagement (click intent)
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL):
-Ensure the output is safe for:
-- JSON POST requests
-- WordPress REST API
-
-Therefore:
-- Remove or replace all invalid characters
-- Remove control characters
-- Fix or remove broken Unicode
-- Remove unescaped quotes or malformed symbols
-
---------------------------------------------------
-
-STRICT RULES:
-- Do NOT include HTML
-- Do NOT include JSON
-- Do NOT summarize excessively (keep factual accuracy)
-- Do NOT invent information not present in the source
-- Do NOT exceed or go below the character limits
-
---------------------------------------------------
-
-OUTPUT RULE:
-Return ONLY the final meta description as plain text.
-
-CONTENT:
-$contentEn";
-
-        return $this->callOpenAI($prompt);
+                $prompt = $this->buildMetaDescriptionPrompt($contentEn, 'EN');
+                return $this->sanitizeMetaDescription($this->callOpenAI($prompt, 120), $contentEn, 'EN');
     }
 
     /**
@@ -489,75 +74,8 @@ $contentEn";
      */
     public function generateFrenchKeyphrase(string $contentFr): ?string
     {
-        $prompt = "Task: Generate a SEO Focus Keyphrase in FRENCH based on the content of the French news article content.
-
---------------------------------------------------
-
-GOAL:
-Extract or create a highly relevant focus keyphrase for SEO (WordPress / Yoast / RankMath).
-
---------------------------------------------------
-
-REQUIREMENTS:
-- Output language: FRENCH
-- Output type: plain text only (NO HTML, NO JSON)
-
---------------------------------------------------
-
-KEYPHRASE RULES:
-- Must represent the main topic of the aviation news article
-- Must be SEO-relevant and searchable
-- Length: 2 to 5 words (STRICT)
-- Must include at least one key entity when possible:
-  * airline (e.g., Air France)
-  * aircraft (e.g., Airbus A320)
-  * manufacturer or airport if relevant
-
---------------------------------------------------
-
-ANALYSIS INSTRUCTIONS:
-Carefully analyze the full content of the article, including:
-- main subject of the article
-- aviation entities (airlines, aircraft, manufacturers, airports)
-- key event or news angle
-
-Ignore:
-- email metadata
-- signatures
-- greetings
-- irrelevant text or repeated headers
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL):
-Ensure output is safe for:
-- JSON POST requests
-- WordPress REST API
-
-Therefore:
-- Remove or replace invalid characters
-- Remove control characters
-- Fix or remove broken Unicode
-- Remove unescaped quotes or malformed symbols
-- Ensure no HTML is included
-
---------------------------------------------------
-
-STRICT RULES:
-- Do NOT use full sentences
-- Do NOT include explanations
-- Do NOT exceed 5 words
-- Do NOT invent information not present in the source
-
---------------------------------------------------
-
-OUTPUT RULE:
-Return ONLY the final focus keyphrase as plain text.
-
-CONTENT:
-$contentFr";
-
-        return $this->callOpenAI($prompt);
+                $prompt = $this->buildKeyphrasePrompt($contentFr, 'FR');
+                return $this->sanitizeKeyphrase($this->callOpenAI($prompt, 40), $contentFr, 'FR');
     }
 
     /**
@@ -565,75 +83,8 @@ $contentFr";
      */
     public function generateEnglishKeyphrase(string $contentEn): ?string
     {
-        $prompt = "Task: Generate a SEO Focus Keyphrase in ENGLISH based on the English content (ENGLISH news article content).
-
---------------------------------------------------
-
-GOAL:
-Extract or create a highly relevant focus keyphrase for SEO (WordPress / Yoast / RankMath).
-
---------------------------------------------------
-
-REQUIREMENTS:
-- Output language: ENGLISH
-- Output type: plain text only (NO HTML, NO JSON)
-
---------------------------------------------------
-
-KEYPHRASE RULES:
-- Must represent the main topic of the aviation news article
-- Must be SEO-relevant and searchable
-- Length: 2 to 5 words (STRICT)
-- Must include at least one key entity when possible:
-  * airline (e.g., Air France)
-  * aircraft (e.g., Airbus A320)
-  * manufacturer or airport if relevant
-
---------------------------------------------------
-
-ANALYSIS INSTRUCTIONS:
-Carefully analyze the full content of the article, including:
-- main subject of the article
-- aviation entities (airlines, aircraft, manufacturers, airports)
-- key event or news angle
-
-Ignore:
-- email metadata
-- signatures
-- greetings
-- irrelevant text or repeated headers
-
---------------------------------------------------
-
-CLEANING RULES (CRITICAL):
-Ensure output is safe for:
-- JSON POST requests
-- WordPress REST API
-
-Therefore:
-- Remove or replace invalid characters
-- Remove control characters
-- Fix or remove broken Unicode
-- Remove unescaped quotes or malformed symbols
-- Ensure no HTML is included
-
---------------------------------------------------
-
-STRICT RULES:
-- Do NOT use full sentences
-- Do NOT include explanations
-- Do NOT exceed 5 words
-- Do NOT invent information not present in the source
-
---------------------------------------------------
-
-OUTPUT RULE:
-Return ONLY the final focus keyphrase as plain text.
-
-CONTENT:
-$contentEn";
-
-        return $this->callOpenAI($prompt);
+                $prompt = $this->buildKeyphrasePrompt($contentEn, 'EN');
+                return $this->sanitizeKeyphrase($this->callOpenAI($prompt, 40), $contentEn, 'EN');
     }
 
     /**
@@ -641,6 +92,10 @@ $contentEn";
      */
     public function classifyCategories(string $newsContent, array $categories, string $lang = 'FR'): ?string
     {
+        if (empty($categories)) {
+            return '';
+        }
+
         $categoriesList = implode("\n", array_map(function ($cat) {
             return "- ID: {$cat['wp_id']}, Name: {$cat['categ_name']}";
         }, $categories));
@@ -680,7 +135,7 @@ Aucun texte supplémentaire et aucune lettre.
 EXEMPLE VALIDE :
 1,5,8";
 
-        return $this->callOpenAI($prompt);
+        return $this->sanitizeIdList($this->callOpenAI($prompt, 80), $categories, $newsContent, true, 'categ_name');
     }
 
     /**
@@ -688,6 +143,10 @@ EXEMPLE VALIDE :
      */
     public function classifyTags(string $newsContent, array $tags, string $lang = 'FR'): ?string
     {
+        if (empty($tags)) {
+            return '';
+        }
+
         $tagsList = implode("\n", array_map(function ($tag) {
             return "- ID: {$tag['wp_id']}, Name: {$tag['tag_name']}";
         }, $tags));
@@ -718,7 +177,260 @@ Si aucun tag n'est applicable, retourne vide.
 EXEMPLE VALIDE :
 1,3,7";
 
-        return $this->callOpenAI($prompt);
+        return $this->sanitizeIdList($this->callOpenAI($prompt, 80), $tags, $newsContent, false, 'tag_name');
+    }
+
+    private function buildTitlePrompt(string $content, string $lang): string
+    {
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+
+        return "You are an aviation editor.\n"
+            . "Write ONE SEO title in {$language} from the article text below.\n"
+            . "Rules:\n"
+            . "- Use only the {$language} article section.\n"
+            . "- Ignore email chrome, confidentiality notices, styles, signatures, reply chains and bilingual sections in the other language.\n"
+            . "- Maximum 53 characters.\n"
+            . "- If longer, rewrite naturally; do not cut mid-word.\n"
+            . "- No HTML. No quotes. No prefix like RE/FW/TR.\n"
+            . "- Return only the title.\n\n"
+            . $content;
+    }
+
+    private function buildContentPrompt(string $content, string $title, string $lang): string
+    {
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+
+        return "You are an aviation news extractor.\n"
+            . "Extract ONLY the main {$language} news article from the text below.\n"
+            . "Rules:\n"
+            . "- Keep only the {$language} version.\n"
+            . "- Exclude confidentiality notices, style blocks, signatures, contacts, reply chains, headers, footers and unrelated boilerplate.\n"
+            . "- Return clean semantic HTML only using <h2>, <p>, <ul>, <li>, <a>, <img> when justified.\n"
+            . "- Start with <h2>{$title}</h2>.\n"
+            . "- Do not include CSS, <style>, <head>, <body>, <html>, tables, inline office markup or both languages.\n"
+            . "- Keep factual content only.\n"
+            . "- Return HTML only.\n\n"
+            . $content;
+    }
+
+    private function buildMetaDescriptionPrompt(string $content, string $lang): string
+    {
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+
+        return "Write one plain-text SEO meta description in {$language}.\n"
+            . "Rules:\n"
+            . "- 110 to 140 characters.\n"
+            . "- Plain text only, no HTML, no CSS, no quotes.\n"
+            . "- Mention the core aviation topic and one key fact.\n"
+            . "- Return only the meta description.\n\n"
+            . strip_tags($content);
+    }
+
+    private function buildKeyphrasePrompt(string $content, string $lang): string
+    {
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+
+        return "Write one SEO focus keyphrase in {$language}.\n"
+            . "Rules:\n"
+            . "- 2 to 5 words.\n"
+            . "- Must identify the central aviation subject.\n"
+            . "- Prefer company, aircraft, airport, program or route names when present.\n"
+            . "- No sentence, no punctuation at the end, no HTML.\n"
+            . "- Return only the keyphrase.\n\n"
+            . strip_tags($content);
+    }
+
+    private function sanitizeTitle(?string $title, string $fallbackContent, string $lang): ?string
+    {
+        $fallbackTitle = $this->extractFallbackTitleFromContent($fallbackContent, $lang);
+
+        $text = $fallbackTitle !== '' ? $fallbackTitle : $this->sanitizePlainText($title ?? '');
+
+        $text = preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $text) ?? $text;
+        $text = preg_replace('/\s*[-|:]\s*(version|v)\s*\d+$/i', '', $text) ?? $text;
+        return $this->smartLimit($text, 53);
+    }
+
+    private function sanitizeHtmlArticle(?string $html, string $fallbackContent, string $title, string $lang): ?string
+    {
+        $candidate = trim((string) $html);
+
+        if ($candidate === '' || strpos($candidate, '<') === false) {
+            $candidate = '';
+        }
+
+        if ($candidate !== '') {
+            $candidate = preg_replace('/<(html|head|body|style|table|tbody|thead|tfoot|tr|td|th)[^>]*>/i', '', $candidate) ?? $candidate;
+            $candidate = preg_replace('/<\/(html|head|body|style|table|tbody|thead|tfoot|tr|td|th)>/i', '', $candidate) ?? $candidate;
+            $candidate = preg_replace('/\sstyle="[^"]*"/i', '', $candidate) ?? $candidate;
+            $candidate = preg_replace('/\sclass="[^"]*"/i', '', $candidate) ?? $candidate;
+            $candidate = preg_replace('/\sid="[^"]*"/i', '', $candidate) ?? $candidate;
+            $candidate = html_entity_decode($candidate, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        }
+
+        $text = trim(strip_tags($candidate));
+        if ($text === '' || mb_strlen($text) < 120) {
+            $candidate = '<h2>' . e($title) . '</h2><p>' . nl2br(e(trim(strip_tags($fallbackContent)))) . '</p>';
+        }
+
+        return trim($candidate);
+    }
+
+    private function sanitizeMetaDescription(?string $value, string $content, string $lang): ?string
+    {
+        $text = $this->extractMetaSourceText($content);
+
+        if (mb_strlen($text) > 140) {
+            $text = $this->smartLimit($text, 140);
+        }
+
+        if (mb_strlen($text) < 110) {
+            $base = $this->sanitizePlainText(strip_tags($content));
+            $text = $this->smartLimit($base, 140);
+        }
+
+        return trim($text);
+    }
+
+    private function sanitizeKeyphrase(?string $value, string $content, string $lang): ?string
+    {
+        $title = $this->extractFallbackTitleFromContent($content, $lang);
+        $text = $this->extractKeyphraseFromContent($title !== '' ? $title : $content, $lang);
+
+        return $this->smartLimit($text, 60);
+    }
+
+    private function sanitizeIdList(?string $value, array $items, string $content, bool $includeNewsDefault, string $nameField): string
+    {
+        $allowedIds = array_map(static fn ($item) => (string) $item['wp_id'], $items);
+        $parts = preg_split('/[^0-9]+/', (string) $value) ?: [];
+        $ids = [];
+
+        foreach ($parts as $part) {
+            if ($part !== '' && in_array($part, $allowedIds, true) && !in_array($part, $ids, true)) {
+                $ids[] = $part;
+            }
+        }
+
+        if ($includeNewsDefault) {
+            foreach ($items as $item) {
+                if (mb_strtolower((string) $item[$nameField]) === 'news' && !in_array((string) $item['wp_id'], $ids, true)) {
+                    array_unshift($ids, (string) $item['wp_id']);
+                    break;
+                }
+            }
+        }
+
+        $contentText = mb_strtolower($this->sanitizePlainText(strip_tags($content)));
+        foreach ($items as $item) {
+            $name = mb_strtolower((string) $item[$nameField]);
+            if ($name !== '' && str_contains($contentText, $name) && !in_array((string) $item['wp_id'], $ids, true)) {
+                $ids[] = (string) $item['wp_id'];
+            }
+        }
+
+        return implode(',', array_slice($ids, 0, $includeNewsDefault ? 6 : 12));
+    }
+
+    private function sanitizePlainText(string $text): string
+    {
+        $text = html_entity_decode(strip_tags($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = preg_replace('/\s+/', ' ', $text) ?? $text;
+        $text = trim($text, " \t\n\r\0\x0B\"'");
+        return trim($text);
+    }
+
+    private function smartLimit(string $text, int $maxLength): string
+    {
+        $text = trim($text);
+        if (mb_strlen($text) <= $maxLength) {
+            return $text;
+        }
+
+        $short = trim(mb_substr($text, 0, $maxLength + 1));
+        $lastSpace = mb_strrpos($short, ' ');
+        if ($lastSpace !== false && $lastSpace >= (int) floor($maxLength * 0.6)) {
+            return rtrim(mb_substr($short, 0, $lastSpace), " ,;:-");
+        }
+
+        return rtrim(mb_substr($text, 0, $maxLength), " ,;:-");
+    }
+
+    private function extractFallbackTitleFromContent(string $content, string $lang): string
+    {
+        $text = $this->sanitizePlainText($content);
+        $lines = preg_split('/\n+/', trim($content)) ?: [];
+
+        foreach ($lines as $line) {
+            $line = $this->sanitizePlainText($line);
+            if (
+                mb_strlen($line) >= 12
+                && mb_strlen($line) <= 120
+                && !str_starts_with($line, '•')
+                && !preg_match('/^aeromorning\b/i', $line)
+                && !preg_match('/^[0-9]+[.)]/', $line)
+            ) {
+                return $line;
+            }
+        }
+
+        $sentences = preg_split('/(?<=[.!?])\s+/', $text) ?: [];
+        foreach ($sentences as $sentence) {
+            $sentence = trim($sentence);
+            if (mb_strlen($sentence) >= 20) {
+                return $sentence;
+            }
+        }
+
+        return $lang === 'FR' ? 'Actualite aviation' : 'Aviation news update';
+    }
+
+    private function extractKeyphraseFromContent(string $content, string $lang): string
+    {
+        preg_match_all('/\b[A-Z][A-Za-z0-9\-]{2,}(?:\s+[A-Z0-9][A-Za-z0-9\-]{1,}){0,3}\b/u', strip_tags($content), $matches);
+        $phrases = array_values(array_filter($matches[0] ?? [], static fn ($value) => mb_strlen(trim($value)) >= 4));
+
+        if (!empty($phrases)) {
+            return trim($phrases[0]);
+        }
+
+        $words = preg_split('/\s+/', $this->sanitizePlainText(strip_tags($content))) ?: [];
+        return implode(' ', array_slice(array_filter($words), 0, 4));
+    }
+
+    private function looksRepeated(string $text): bool
+    {
+        if (mb_strlen($text) < 40) {
+            return false;
+        }
+
+        $prefix = mb_substr($text, 0, 30);
+        return mb_substr_count($text, $prefix) > 1;
+    }
+
+    private function extractMetaSourceText(string $content): string
+    {
+        $lines = preg_split('/\n+/', trim(strip_tags($content))) ?: [];
+        $usable = [];
+
+        foreach ($lines as $line) {
+            $line = $this->sanitizePlainText($line);
+            if (
+                $line === ''
+                || preg_match('/^aeromorning\b/i', $line)
+                || preg_match('/^[0-9]+[.)]/', $line)
+            ) {
+                continue;
+            }
+
+            $usable[] = $line;
+        }
+
+        if (count($usable) > 1) {
+            array_shift($usable);
+        }
+
+        return $this->sanitizePlainText(implode(' ', array_slice($usable, 0, 3)));
     }
 
     /**

@@ -103,7 +103,7 @@ class EmailService
                 throw new \RuntimeException('IMAP mailbox is unavailable. Check IMAP configuration in .env.');
             }
 
-            $criteria = strtoupper((string) env('IMAP_SEARCH_CRITERIA', 'ALL'));
+            $criteria = strtoupper((string) env('IMAP_SEARCH_CRITERIA', 'UNSEEN'));
             $mailsIds = $this->mailbox->searchMailbox($criteria);
 
             if (!$mailsIds) {
@@ -145,9 +145,14 @@ class EmailService
         // Extract attachments
         if (!empty($mail->getAttachments())) {
             foreach ($mail->getAttachments() as $attachment) {
+                $filename = $attachment->name ?? '';
+                if ($filename === '' && !empty($attachment->filePath)) {
+                    $filename = basename((string) $attachment->filePath);
+                }
+
                 $content['attachments'][] = [
-                    'filename' => $attachment->filename,
-                    'mime' => $attachment->mimeType,
+                    'filename' => $filename,
+                    'mime' => $attachment->mimeType ?? ($attachment->mime ?? ''),
                     'path' => $attachment->filePath
                 ];
             }

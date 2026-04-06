@@ -8,6 +8,7 @@ use App\Models\TagFr;
 use App\Models\TagEn;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class WordPressService
 {
@@ -26,23 +27,24 @@ class WordPressService
     public function syncCategoriesFr(): bool
     {
         try {
-            $categories = $this->fetchFromWordpress("{$this->wpFrUrl}/wp-json/wp/v2/categories", 100);
-            
-            if (!$categories) {
+            $syncedCount = $this->syncWordPressItems(
+                "{$this->wpFrUrl}/wp-json/wp/v2/categories",
+                function (int $id, string $name): void {
+                    CategoryFr::updateOrCreate(
+                        ['wp_id' => $id],
+                        ['categ_name' => $name]
+                    );
+                }
+            );
+
+            if ($syncedCount === 0) {
                 Log::warning('No categories fetched from WordPress FR');
                 return false;
             }
 
-            foreach ($categories as $category) {
-                CategoryFr::updateOrCreate(
-                    ['wp_id' => $category['id']],
-                    ['categ_name' => $category['name']]
-                );
-            }
-
-            Log::info('Successfully synced ' . count($categories) . ' French categories');
+            Log::info('Successfully synced ' . $syncedCount . ' French categories');
             return true;
-        } catch (\Exception $e) {
+        } catch (Throwable $e) {
             Log::error('Error syncing FR categories: ' . $e->getMessage());
             return false;
         }
@@ -54,23 +56,24 @@ class WordPressService
     public function syncCategoriesEn(): bool
     {
         try {
-            $categories = $this->fetchFromWordpress("{$this->wpEnUrl}/wp-json/wp/v2/categories", 100);
-            
-            if (!$categories) {
+            $syncedCount = $this->syncWordPressItems(
+                "{$this->wpEnUrl}/wp-json/wp/v2/categories",
+                function (int $id, string $name): void {
+                    CategoryEn::updateOrCreate(
+                        ['wp_id' => $id],
+                        ['categ_name' => $name]
+                    );
+                }
+            );
+
+            if ($syncedCount === 0) {
                 Log::warning('No categories fetched from WordPress EN');
                 return false;
             }
 
-            foreach ($categories as $category) {
-                CategoryEn::updateOrCreate(
-                    ['wp_id' => $category['id']],
-                    ['categ_name' => $category['name']]
-                );
-            }
-
-            Log::info('Successfully synced ' . count($categories) . ' English categories');
+            Log::info('Successfully synced ' . $syncedCount . ' English categories');
             return true;
-        } catch (\Exception $e) {
+        } catch (Throwable $e) {
             Log::error('Error syncing EN categories: ' . $e->getMessage());
             return false;
         }
@@ -82,23 +85,24 @@ class WordPressService
     public function syncTagsFr(): bool
     {
         try {
-            $tags = $this->fetchFromWordpress("{$this->wpFrUrl}/wp-json/wp/v2/tags", 100);
-            
-            if (!$tags) {
+            $syncedCount = $this->syncWordPressItems(
+                "{$this->wpFrUrl}/wp-json/wp/v2/tags",
+                function (int $id, string $name): void {
+                    TagFr::updateOrCreate(
+                        ['wp_id' => $id],
+                        ['tag_name' => $name]
+                    );
+                }
+            );
+
+            if ($syncedCount === 0) {
                 Log::warning('No tags fetched from WordPress FR');
                 return false;
             }
 
-            foreach ($tags as $tag) {
-                TagFr::updateOrCreate(
-                    ['wp_id' => $tag['id']],
-                    ['tag_name' => $tag['name']]
-                );
-            }
-
-            Log::info('Successfully synced ' . count($tags) . ' French tags');
+            Log::info('Successfully synced ' . $syncedCount . ' French tags');
             return true;
-        } catch (\Exception $e) {
+        } catch (Throwable $e) {
             Log::error('Error syncing FR tags: ' . $e->getMessage());
             return false;
         }
@@ -110,63 +114,71 @@ class WordPressService
     public function syncTagsEn(): bool
     {
         try {
-            $tags = $this->fetchFromWordpress("{$this->wpEnUrl}/wp-json/wp/v2/tags", 100);
-            
-            if (!$tags) {
+            $syncedCount = $this->syncWordPressItems(
+                "{$this->wpEnUrl}/wp-json/wp/v2/tags",
+                function (int $id, string $name): void {
+                    TagEn::updateOrCreate(
+                        ['wp_id' => $id],
+                        ['tag_name' => $name]
+                    );
+                }
+            );
+
+            if ($syncedCount === 0) {
                 Log::warning('No tags fetched from WordPress EN');
                 return false;
             }
 
-            foreach ($tags as $tag) {
-                TagEn::updateOrCreate(
-                    ['wp_id' => $tag['id']],
-                    ['tag_name' => $tag['name']]
-                );
-            }
-
-            Log::info('Successfully synced ' . count($tags) . ' English tags');
+            Log::info('Successfully synced ' . $syncedCount . ' English tags');
             return true;
-        } catch (\Exception $e) {
+        } catch (Throwable $e) {
             Log::error('Error syncing EN tags: ' . $e->getMessage());
             return false;
         }
     }
 
     /**
-     * Fetch data from WordPress API with pagination
+     * Sync data from WordPress API with pagination and incremental upsert.
      */
-    private function fetchFromWordpress(string $url, int $perPage = 100): ?array
+    private function syncWordPressItems(string $url, callable $upsert, int $perPage = 50): int
     {
-        try {
-            $allItems = [];
-            $page = 1;
-            
-            do {
-                $response = Http::timeout(30)->get($url, [
+        $syncedCount = 0;
+        $page = 1;
+        $totalPages = 1;
+
+        do {
+            $response = Http::connectTimeout(15)
+                ->timeout(60)
+                ->retry(2, 1500)
+                ->get($url, [
                     'per_page' => $perPage,
-                    'page' => $page
+                    'page' => $page,
                 ]);
 
-                if (!$response->successful()) {
-                    Log::error("WordPress API error: {$response->status()} - {$url}");
-                    return null;
+            if (!$response->successful()) {
+                throw new \RuntimeException("WordPress API error {$response->status()} for {$url} (page {$page})");
+            }
+
+            $items = $response->json();
+            if (!is_array($items)) {
+                throw new \RuntimeException("Invalid WordPress response format for {$url} (page {$page})");
+            }
+
+            foreach ($items as $item) {
+                if (!is_array($item) || !isset($item['id'], $item['name'])) {
+                    continue;
                 }
 
-                $items = $response->json();
-                if (empty($items)) {
-                    break;
-                }
+                $upsert((int) $item['id'], (string) $item['name']);
+                $syncedCount++;
+            }
 
-                $allItems = array_merge($allItems, $items);
-                $page++;
-                
-            } while (count($items) === $perPage);
+            $headerPages = (int) $response->header('X-WP-TotalPages', 1);
+            $totalPages = $headerPages > 0 ? $headerPages : 1;
+            $page++;
+        } while (!empty($items) && $page <= $totalPages);
 
-            return $allItems;
-        } catch (\Exception $e) {
-            Log::error("Error fetching from WordPress: " . $e->getMessage());
-            return null;
-        }
+        return $syncedCount;
     }
 
     /**

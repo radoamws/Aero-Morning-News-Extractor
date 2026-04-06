@@ -18,3 +18,4 @@ yarn-error.log
 /.idea
 /.vscode
 /gestion-news/node_modules
+/api/vendor

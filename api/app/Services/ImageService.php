@@ -138,6 +138,41 @@ class ImageService
             return "/storage/images/{$filename}";
         } catch (\Exception $e) {
             Log::error("Error in image processing: " . $e->getMessage());
+            return $this->storeOriginalImage($filePath, $newsTitle);
+        }
+    }
+
+    private function storeOriginalImage(string $filePath, string $newsTitle): ?string
+    {
+        try {
+            if (!file_exists($filePath)) {
+                return null;
+            }
+
+            $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+            if ($extension === '' || $extension === 'bin' || $extension === 'tmp') {
+                $mimeType = mime_content_type($filePath) ?: '';
+                $extension = match ($mimeType) {
+                    'image/png' => 'png',
+                    'image/webp' => 'webp',
+                    'image/gif' => 'gif',
+                    default => 'jpg',
+                };
+            }
+
+            $slug = Str::slug($newsTitle);
+            $slug = substr($slug, 0, 100);
+            $filename = "{$slug}-" . uniqid() . ".{$extension}";
+            $storagePath = storage_path("app/public/images/{$filename}");
+            @mkdir(dirname($storagePath), 0755, true);
+
+            if (!@copy($filePath, $storagePath)) {
+                return null;
+            }
+
+            return "/storage/images/{$filename}";
+        } catch (\Exception $e) {
+            Log::error("Error storing original image: " . $e->getMessage());
             return null;
         }
     }
