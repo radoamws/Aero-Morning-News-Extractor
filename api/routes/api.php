@@ -28,6 +28,7 @@ Route::middleware('auth:sanctum')->group(function () {
 	// WordPress posting
 	Route::post('/news/{id}/post-to-wordpress', [WordPressPostingController::class, 'postNews']);
 	Route::post('/news/bulk-post-to-wordpress', [WordPressPostingController::class, 'bulkPostNews']);
+	Route::post('/publish-pending', [WordPressPostingController::class, 'publishPendingNews']);
 	Route::get('/news/{id}/preview', [WordPressPostingController::class, 'previewNews']);
 
 	// Statistics

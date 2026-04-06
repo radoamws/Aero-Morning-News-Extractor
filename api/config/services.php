@@ -2,8 +2,14 @@
 
 return [
     'wordpress' => [
-        'fr_url' => env('WORDPRESS_FR_URL', 'https://preprod.aeromorning.com'),
-        'en_url' => env('WORDPRESS_EN_URL', 'https://preprod.aeromorning.com/en'),
+        'fr_url'   => env('WORDPRESS_FR_URL', 'https://preprod.aeromorning.com'),
+        'en_url'   => env('WORDPRESS_EN_URL', 'https://preprod.aeromorning.com/en'),
+        'auth_fr'  => env('WORDPRESS_AUTH_FR', ''),
+        'auth_en'  => env('WORDPRESS_AUTH_EN', ''),
+    ],
+
+    'notify' => [
+        'email' => env('NOTIFY_EMAIL', 'rado.rakotoarivelo@amws.space'),
     ],
 
     'imap' => [

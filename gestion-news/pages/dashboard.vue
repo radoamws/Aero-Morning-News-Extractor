@@ -129,6 +129,9 @@ onMounted(async () => {
         <button class="btn btn-primary" :disabled="actionLoading" @click="newsStore.runProcessEmails()">
           Process Emails
         </button>
+        <button class="btn btn-primary" :disabled="actionLoading" @click="newsStore.runPublishPending()">
+          Publish Pending News
+        </button>
         <button class="btn btn-ghost" :disabled="loading" @click="newsStore.fetchNews()">Rafraichir liste</button>
         <button class="btn btn-ghost" @click="newsStore.fetchStats()">Rafraichir stats</button>
       </div>

@@ -7,6 +7,7 @@ use App\Services\WordPressPostingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 
 class WordPressPostingController extends Controller
 {
@@ -194,6 +195,142 @@ class WordPressPostingController extends Controller
                 'success' => false,
                 'message' => $e->getMessage()
             ], 500);
+        }
+    }
+
+    /**
+     * Publish all pending (status=0) news to WordPress automatically.
+     * Uses the Application Password stored in .env — no credentials in the request.
+     * Sends an email summary at the end.
+     */
+    public function publishPendingNews(): JsonResponse
+    {
+        try {
+            @ini_set('max_execution_time', '300');
+            @set_time_limit(300);
+
+            $pendingNews = News::where('status', News::STATUS_PENDING)->get();
+
+            if ($pendingNews->isEmpty()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'No pending news to publish.',
+                    'published' => 0,
+                    'failed'    => 0,
+                ]);
+            }
+
+            $results = ['success' => [], 'failed' => []];
+
+            foreach ($pendingNews as $news) {
+                // Mark as syncing
+                $news->status = News::STATUS_SYNCING;
+                $news->save();
+
+                try {
+                    $service = new WordPressPostingService($news->lang);
+                    $result  = $service->publishToWordPress($news);
+
+                    if ($result['success']) {
+                        $news->status = News::STATUS_SYNCED;
+                        $news->save();
+
+                        $results['success'][] = [
+                            'id'         => $news->id,
+                            'lang'       => $news->lang,
+                            'title'      => $news->title,
+                            'wp_post_id' => $result['wp_post_id'],
+                        ];
+                    } else {
+                        $results['failed'][] = [
+                            'id'    => $news->id,
+                            'lang'  => $news->lang,
+                            'title' => $news->title,
+                            'error' => $result['error'] ?? 'Unknown error',
+                        ];
+                    }
+                } catch (\Throwable $e) {
+                    Log::error("Error publishing news #{$news->id}: " . $e->getMessage());
+                    $results['failed'][] = [
+                        'id'    => $news->id,
+                        'lang'  => $news->lang,
+                        'title' => $news->title,
+                        'error' => $e->getMessage(),
+                    ];
+                }
+            }
+
+            // Send summary email
+            $this->sendPublishSummaryEmail($results);
+
+            return response()->json([
+                'success'   => true,
+                'message'   => 'Publishing completed.',
+                'published' => count($results['success']),
+                'failed'    => count($results['failed']),
+                'details'   => $results,
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error("Fatal error in publishPendingNews: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+
+    private function sendPublishSummaryEmail(array $results): void
+    {
+        $to           = config('services.notify.email', env('NOTIFY_EMAIL', 'rado.rakotoarivelo@amws.space'));
+        $successCount = count($results['success']);
+        $failedCount  = count($results['failed']);
+        $total        = $successCount + $failedCount;
+        $remainingPending = News::where('status', News::STATUS_PENDING)->count();
+
+        $body  = "Résumé de publication WordPress — " . now()->format('d/m/Y H:i') . "\n";
+        $body .= str_repeat('=', 60) . "\n\n";
+        $body .= "Total traité dans ce batch : {$total}\n";
+        $body .= "  ✓ Publiées avec succès (status 2) : {$successCount}\n";
+        $body .= "  ✗ En échec            (status 1) : {$failedCount}\n";
+
+        if ($remainingPending > 0) {
+            $body .= "  ⚠ Non traitées         (status 0) : {$remainingPending}\n";
+        }
+
+        $body .= "\n";
+
+        if (!empty($results['success'])) {
+            $body .= str_repeat('-', 60) . "\n";
+            $body .= "NEWS PUBLIÉES (status 2)\n";
+            $body .= str_repeat('-', 60) . "\n";
+            foreach ($results['success'] as $item) {
+                $body .= "  [#{$item['id']}] [{$item['lang']}] {$item['title']}\n";
+                $body .= "        → WP post ID : {$item['wp_post_id']}\n";
+            }
+            $body .= "\n";
+        }
+
+        if (!empty($results['failed'])) {
+            $body .= str_repeat('-', 60) . "\n";
+            $body .= "NEWS EN ÉCHEC (status 1)\n";
+            $body .= str_repeat('-', 60) . "\n";
+            foreach ($results['failed'] as $item) {
+                $body .= "  [#{$item['id']}] [{$item['lang']}] {$item['title']}\n";
+                $body .= "        → Erreur : {$item['error']}\n";
+            }
+        }
+
+        try {
+            Mail::raw($body, function ($message) use ($to) {
+                $message->to($to)
+                        ->subject('Résumé publication WordPress — ' . now()->format('d/m/Y H:i'));
+            });
+            Log::info("Publish summary email sent to {$to}");
+        } catch (\Throwable $e) {
+            Log::error("Failed to send publish summary email: " . $e->getMessage());
         }
     }
 }

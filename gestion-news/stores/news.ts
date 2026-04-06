@@ -127,10 +127,36 @@ export const useNewsStore = defineStore("news", {
         const result = await request<{ message: string; processed?: number; failed?: number }>("/process-emails", {
           method: "POST"
         });
-        const details = ` (processed: ${result.processed ?? 0}, failed: ${result.failed ?? 0})`;
-        this.setMessage((result.message || "Traitement des emails termine") + details);
+
+        // Automatically chain publishing so freshly created status=0 rows are sent to WordPress.
+        const publishResult = await request<{ message: string; published?: number; failed?: number }>("/publish-pending", {
+          method: "POST"
+        });
+
+        const details =
+          ` (emails processed: ${result.processed ?? 0}, emails failed: ${result.failed ?? 0}, ` +
+          `published: ${publishResult.published ?? 0}, publish failed: ${publishResult.failed ?? 0})`;
+
+        this.setMessage((publishResult.message || "Traitement + publication termines") + details);
+        await Promise.all([this.fetchNews(), this.fetchStats()]);
       } catch (error: any) {
-        this.setError(error?.data?.message || "Echec traitement emails");
+        this.setError(error?.data?.message || "Echec traitement emails / publication");
+      } finally {
+        this.actionLoading = false;
+      }
+    },
+    async runPublishPending() {
+      const { request } = useApi();
+      this.actionLoading = true;
+      try {
+        const result = await request<{ message: string; published?: number; failed?: number }>("/publish-pending", {
+          method: "POST"
+        });
+        const details = ` (published: ${result.published ?? 0}, failed: ${result.failed ?? 0})`;
+        this.setMessage((result.message || "Publication WordPress terminee") + details);
+        await Promise.all([this.fetchNews(), this.fetchStats()]);
+      } catch (error: any) {
+        this.setError(error?.data?.message || "Echec publication WordPress");
       } finally {
         this.actionLoading = false;
       }
