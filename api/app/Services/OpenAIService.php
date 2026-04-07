@@ -267,6 +267,8 @@ EXEMPLE VALIDE :
             . "- Ignore email chrome, confidentiality notices, styles, signatures, reply chains and bilingual sections in the other language.\n"
             . "- The title must be clear, specific, attractive and newsworthy.\n"
             . "- Strict maximum: 62 characters (including spaces).\n"
+            . "- The title must be a short descriptive phrase, not a single entity or keyword.\n"
+            . "- Minimum target: 4 words when possible. Never return only 1 or 2 words.\n"
             . "- IMPORTANT: You are NOT allowed to truncate, crop, clip, or cut the title.\n"
             . "- If the original source title is already clear and 62 characters or fewer, keep its meaning and wording as close as possible.\n"
             . "- If the original source title exceeds 62 characters, you MUST fully REWRITE it into a shorter SEO headline.\n"
@@ -585,7 +587,25 @@ EXEMPLE VALIDE :
             return false;
         }
 
-        return !$this->endsWithDanglingTitleWord($title);
+        if ($this->endsWithDanglingTitleWord($title)) {
+            return false;
+        }
+
+        return $this->isDescriptiveTitle($title);
+    }
+
+    private function isDescriptiveTitle(string $title): bool
+    {
+        $words = array_values(array_filter(
+            preg_split('/\s+/', trim($title)) ?: [],
+            static fn ($word) => $word !== ''
+        ));
+
+        if (count($words) <= 2) {
+            return false;
+        }
+
+        return mb_strlen(trim($title)) >= 16;
     }
 
     private function endsWithDanglingTitleWord(string $title): bool
@@ -607,6 +627,9 @@ EXEMPLE VALIDE :
             . "SOURCE TITLE: " . $this->normalizeTitleCandidate($sourceTitle) . "\n"
             . "Rules:\n"
             . "- Maximum 62 characters including spaces.\n"
+            . "- Minimum 3 words.\n"
+            . "- Must be a descriptive phrase summarizing the article.\n"
+            . "- Never return only a city, company, country or program name.\n"
             . "- Preserve the exact meaning and the key aviation entities.\n"
             . "- Do not truncate, crop, or end on an incomplete word.\n"
             . "- Do not use ellipsis.\n"
@@ -690,6 +713,7 @@ EXEMPLE VALIDE :
                 && !str_starts_with($line, '•')
                 && !preg_match('/^aeromorning\b/i', $line)
                 && !preg_match('/^[0-9]+[.)]/', $line)
+                && !$this->looksLikeAddressLine($line)
             ) {
                 return $line;
             }
@@ -704,6 +728,20 @@ EXEMPLE VALIDE :
         }
 
         return $lang === 'FR' ? 'Actualite aviation' : 'Aviation news update';
+    }
+
+    private function looksLikeAddressLine(string $line): bool
+    {
+        if (preg_match('/\b\d{3,}\b/', $line) === 1) {
+            return true;
+        }
+
+        if (preg_match('/\b(route|rue|avenue|street|road|pointe|maurice|ile|island|po box)\b/i', $line) === 1) {
+            return true;
+        }
+
+        $parts = array_filter(array_map('trim', explode(',', $line)), static fn ($part) => $part !== '');
+        return count($parts) >= 3;
     }
 
     private function extractKeyphraseFromContent(string $content, string $lang): string

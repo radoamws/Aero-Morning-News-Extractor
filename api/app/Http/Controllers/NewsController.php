@@ -144,10 +144,11 @@ class NewsController extends Controller
             }
 
             // Extract or download image
-            $bodyContent = !empty(trim((string) $emailContent['text_body']))
-                ? $emailContent['text_body']
-                : $emailContent['html_body'];
+            $bodyContent = !empty(trim((string) $emailContent['html_body']))
+                ? $emailContent['html_body']
+                : $emailContent['text_body'];
             $normalizedBodyContent = $this->normalizeEmailBody($bodyContent);
+            $languageDetectionText = $this->normalizePlainTextContent(strip_tags($normalizedBodyContent));
             $imageUrl = null;
             if ($this->emailService->hasAttachments($mail)) {
                 $bestAttachment = $this->selectBestImageAttachment($mail->getAttachments());
@@ -174,7 +175,7 @@ class NewsController extends Controller
             Log::info("Has attachment: " . ($this->emailService->hasAttachments($mail) ? 'yes' : 'no'));
 
             // Detect language from content
-            $language = $this->detectLanguage($normalizedBodyContent);
+            $language = $this->detectLanguage($languageDetectionText);
             $createdAny = false;
 
             // Generate French news if content contains French
@@ -488,7 +489,12 @@ class NewsController extends Controller
         }
 
         if (strpos($content, '<') === false) {
-            return $this->normalizePlainTextContent($content);
+            $plain = $this->normalizePlainTextContent($content);
+            if ($plain === '') {
+                return '';
+            }
+
+            return $this->convertPlainTextToHtmlFragment($plain);
         }
 
         $clean = preg_replace('/<style\b[^>]*>.*?<\/style>/is', ' ', $content) ?? $content;
@@ -503,8 +509,99 @@ class NewsController extends Controller
         $dom->loadHTML('<?xml encoding="utf-8" ?>' . $clean, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
         libxml_clear_errors();
 
-        $body = $dom->saveHTML() ?: $clean;
-        return $this->normalizePlainTextContent($body);
+        $body = '';
+        $bodyNode = $dom->getElementsByTagName('body')->item(0);
+        if ($bodyNode) {
+            foreach ($bodyNode->childNodes as $child) {
+                $body .= $dom->saveHTML($child);
+            }
+        }
+
+        if ($body === '') {
+            $body = $dom->saveHTML() ?: $clean;
+        }
+
+        $body = preg_replace('/\sstyle="[^"]*"/i', '', $body) ?? $body;
+        $body = preg_replace('/\sclass="[^"]*"/i', '', $body) ?? $body;
+        $body = preg_replace('/\sid="[^"]*"/i', '', $body) ?? $body;
+        $body = preg_replace('/<(span|font)[^>]*>/i', '', $body) ?? $body;
+        $body = preg_replace('/<div[^>]*>/i', '', $body) ?? $body;
+        $body = preg_replace('/<\/(span|font|div)>/i', '', $body) ?? $body;
+        $body = preg_replace('/<p>\s*<\/p>/i', '', $body) ?? $body;
+
+        return trim(strip_tags($body, '<h1><h2><h3><h4><p><ul><ol><li><a><strong><em><blockquote><br>'));
+    }
+
+    private function convertPlainTextToHtmlFragment(string $plain): string
+    {
+        $paragraphs = preg_split('/\n{2,}/', $plain) ?: [];
+        $html = '';
+
+        foreach ($paragraphs as $paragraph) {
+            $paragraph = trim($paragraph);
+            if ($paragraph === '') {
+                continue;
+            }
+
+            $lines = preg_split('/\n+/', $paragraph) ?: [];
+            $listType = null;
+            $buffer = [];
+
+            $flushParagraph = function () use (&$html, &$buffer): void {
+                if (!empty($buffer)) {
+                    $html .= '<p>' . implode('<br>', $buffer) . '</p>';
+                    $buffer = [];
+                }
+            };
+
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if ($line === '') {
+                    continue;
+                }
+
+                if (preg_match('/^(?:[-*•])\s+(.+)$/u', $line, $matches)) {
+                    $flushParagraph();
+                    if ($listType !== 'ul') {
+                        if ($listType !== null) {
+                            $html .= "</{$listType}>";
+                        }
+                        $html .= '<ul>';
+                        $listType = 'ul';
+                    }
+                    $html .= '<li>' . htmlspecialchars(trim($matches[1]), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</li>';
+                    continue;
+                }
+
+                if (preg_match('/^\d+[.)]\s+(.+)$/u', $line, $matches)) {
+                    $flushParagraph();
+                    if ($listType !== 'ol') {
+                        if ($listType !== null) {
+                            $html .= "</{$listType}>";
+                        }
+                        $html .= '<ol>';
+                        $listType = 'ol';
+                    }
+                    $html .= '<li>' . htmlspecialchars(trim($matches[1]), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</li>';
+                    continue;
+                }
+
+                if ($listType !== null) {
+                    $html .= "</{$listType}>";
+                    $listType = null;
+                }
+
+                $buffer[] = htmlspecialchars($line, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            }
+
+            $flushParagraph();
+
+            if ($listType !== null) {
+                $html .= "</{$listType}>";
+            }
+        }
+
+        return $html;
     }
 
     private function normalizePlainTextContent(string $content): string
@@ -665,7 +762,8 @@ class NewsController extends Controller
 
     private function extractOriginalArticleTitle(string $content, string $subject, string $lang): string
     {
-        $lines = preg_split('/\n+/', trim($content)) ?: [];
+        $plainContent = $this->normalizePlainTextContent(strip_tags($content));
+        $lines = preg_split('/\n+/', trim($plainContent)) ?: [];
         foreach ($lines as $line) {
             $line = trim($line);
             if (
@@ -674,6 +772,7 @@ class NewsController extends Controller
                 || preg_match('/^aeromorning\b/i', $line)
                 || preg_match('/^[0-9]+[.)]/', $line)
                 || preg_match('/^(version|source)\b/i', $line)
+                || $this->looksLikeAddress($line)
             ) {
                 continue;
             }
@@ -777,6 +876,8 @@ class NewsController extends Controller
             $structured = $this->convertPlainTextToStructuredHtml($plain, $originalTitle);
         }
 
+        $structured = $this->removeDuplicatedTitleInBody($structured, $originalTitle);
+
         $sourceLabel = $lang === 'FR' ? 'Source : ' : 'Source: ';
         $hasSource = preg_match('/\bsource\s*:/i', $structured) === 1;
         if (!$hasSource) {
@@ -788,6 +889,79 @@ class NewsController extends Controller
         }
 
         return $structured;
+    }
+
+    private function removeDuplicatedTitleInBody(string $html, string $title): string
+    {
+        $normalizedTitle = mb_strtolower(trim(preg_replace('/\s+/', ' ', strip_tags($title)) ?? ''));
+        if ($normalizedTitle === '') {
+            return $html;
+        }
+
+        $dom = new DOMDocument();
+        libxml_use_internal_errors(true);
+        $dom->loadHTML('<?xml encoding="utf-8" ?><div id="root">' . $html . '</div>', LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+        libxml_clear_errors();
+
+        $root = $dom->getElementById('root');
+        if (!$root) {
+            return $html;
+        }
+
+        $seenH2 = false;
+        $toRemove = [];
+        foreach ($root->childNodes as $node) {
+            if (!($node instanceof \DOMElement)) {
+                continue;
+            }
+
+            if (strtolower($node->tagName) === 'h2' && !$seenH2) {
+                $seenH2 = true;
+                continue;
+            }
+
+            if (!$seenH2) {
+                continue;
+            }
+
+            $nodeText = mb_strtolower(trim(preg_replace('/\s+/', ' ', $node->textContent) ?? ''));
+            if (in_array(strtolower($node->tagName), ['p', 'h3', 'h4', 'strong'], true) && $nodeText === $normalizedTitle) {
+                $toRemove[] = $node;
+                continue;
+            }
+
+            break;
+        }
+
+        foreach ($toRemove as $node) {
+            $node->parentNode?->removeChild($node);
+        }
+
+        $result = '';
+        foreach ($root->childNodes as $child) {
+            $result .= $dom->saveHTML($child);
+        }
+
+        return trim($result);
+    }
+
+    private function looksLikeAddress(string $text): bool
+    {
+        $text = trim($text);
+        if ($text === '') {
+            return false;
+        }
+
+        if (preg_match('/\b\d{3,}\b/', $text) === 1) {
+            return true;
+        }
+
+        if (preg_match('/\b(route|rue|avenue|street|road|pointe|maurice|ile|island|po box)\b/i', $text) === 1) {
+            return true;
+        }
+
+        $parts = array_filter(array_map('trim', explode(',', $text)), static fn ($part) => $part !== '');
+        return count($parts) >= 3;
     }
 
     private function buildMetaDescriptionFromArticle(string $contentHtml, string $lang): string
@@ -876,8 +1050,11 @@ class NewsController extends Controller
         $html = preg_replace('/\sid="[^"]*"/i', '', $html) ?? $html;
         $html = strip_tags($html, '<h1><h2><h3><h4><p><ul><ol><li><a><strong><em><blockquote><br>');
         $html = preg_replace('/<p>\s*[-•*]\s*(.*?)<\/p>/iu', '<ul><li>$1</li></ul>', $html) ?? $html;
+        $html = preg_replace('/<p>\s*\d+[.)]\s*(.*?)<\/p>/iu', '<ol><li>$1</li></ol>', $html) ?? $html;
         $html = preg_replace('/(?:<ul>\s*){2,}/i', '<ul>', $html) ?? $html;
         $html = preg_replace('/(?:<\/ul>\s*){2,}/i', '</ul>', $html) ?? $html;
+        $html = preg_replace('/(?:<ol>\s*){2,}/i', '<ol>', $html) ?? $html;
+        $html = preg_replace('/(?:<\/ol>\s*){2,}/i', '</ol>', $html) ?? $html;
         $html = trim($html);
 
         return $html;
