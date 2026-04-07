@@ -248,19 +248,25 @@ class NewsController extends Controller
     {
         try {
             // Generate French metadata
-            $titleFr = $this->openaiService->generateFrenchTitle($content);
+            $titlePayloadFr = $this->openaiService->generateFrenchTitlePayload($content, $originalTitle);
+            $titleFr = $titlePayloadFr['optimized'] ?? null;
+            $h2TitleFr = $titlePayloadFr['use_original_in_h2'] ?? false
+                ? ($titlePayloadFr['original'] ?? $originalTitle)
+                : ($titlePayloadFr['optimized'] ?? $originalTitle);
+
             if (!$titleFr) {
                 $titleFr = $this->fallbackTitle($subject, 'FR');
+                $h2TitleFr = mb_strlen($originalTitle) > 62 ? $originalTitle : $titleFr;
                 Log::warning("Failed to generate French title, using fallback title");
             }
 
-            $contentFr = $this->openaiService->generateFrenchContent($content, $titleFr);
+            $contentFr = $this->openaiService->generateFrenchContent($content, $titleFr, $originalTitle);
             if (!$contentFr) {
-                $contentFr = $this->fallbackContent($content, $titleFr, 'FR');
+                $contentFr = $this->fallbackContent($content, $h2TitleFr, 'FR');
                 Log::warning("Failed to generate French content, using fallback content");
             }
 
-            $contentFr = $this->finalizeArticleHtml($contentFr, $content, $titleFr, $sourceHint, 'FR');
+            $contentFr = $this->finalizeArticleHtml($contentFr, $content, $h2TitleFr, $sourceHint, 'FR');
 
             $metaDescFr = $this->openaiService->generateFrenchMetaDescription($contentFr);
             if (!$metaDescFr) {
@@ -283,7 +289,7 @@ class NewsController extends Controller
             // Save to database
             News::create([
                 'lang' => 'FR',
-                'title' => $this->shortenTitleForColumn($titleFr),
+                'title' => trim(strip_tags($titleFr)),
                 'content' => $contentFr,
                 'metadescription' => $metaDescFr ?? '',
                 'focuskeyphrase' => $keyPhraseFr ?? '',
@@ -316,19 +322,25 @@ class NewsController extends Controller
     {
         try {
             // Generate English metadata
-            $titleEn = $this->openaiService->generateEnglishTitle($content);
+            $titlePayloadEn = $this->openaiService->generateEnglishTitlePayload($content, $originalTitle);
+            $titleEn = $titlePayloadEn['optimized'] ?? null;
+            $h2TitleEn = $titlePayloadEn['use_original_in_h2'] ?? false
+                ? ($titlePayloadEn['original'] ?? $originalTitle)
+                : ($titlePayloadEn['optimized'] ?? $originalTitle);
+
             if (!$titleEn) {
                 $titleEn = $this->fallbackTitle($subject, 'EN');
+                $h2TitleEn = mb_strlen($originalTitle) > 62 ? $originalTitle : $titleEn;
                 Log::warning("Failed to generate English title, using fallback title");
             }
 
-            $contentEn = $this->openaiService->generateEnglishContent($content, $titleEn);
+            $contentEn = $this->openaiService->generateEnglishContent($content, $titleEn, $originalTitle);
             if (!$contentEn) {
-                $contentEn = $this->fallbackContent($content, $titleEn, 'EN');
+                $contentEn = $this->fallbackContent($content, $h2TitleEn, 'EN');
                 Log::warning("Failed to generate English content, using fallback content");
             }
 
-            $contentEn = $this->finalizeArticleHtml($contentEn, $content, $titleEn, $sourceHint, 'EN');
+            $contentEn = $this->finalizeArticleHtml($contentEn, $content, $h2TitleEn, $sourceHint, 'EN');
 
             $metaDescEn = $this->openaiService->generateEnglishMetaDescription($contentEn);
             if (!$metaDescEn) {
@@ -351,7 +363,7 @@ class NewsController extends Controller
             // Save to database
             News::create([
                 'lang' => 'EN',
-                'title' => $this->shortenTitleForColumn($titleEn),
+                'title' => trim(strip_tags($titleEn)),
                 'content' => $contentEn,
                 'metadescription' => $metaDescEn ?? '',
                 'focuskeyphrase' => $keyPhraseEn ?? '',
@@ -831,28 +843,6 @@ class NewsController extends Controller
         }
 
         return trim($meta);
-    }
-
-    private function shortenTitleForColumn(string $originalTitle, int $max = 62): string
-    {
-        $title = trim(strip_tags($originalTitle));
-        if (mb_strlen($title) <= $max) {
-            return $title;
-        }
-        // Break at a natural separator within budget
-        foreach ([' : ', ' – ', ' - ', ' | '] as $sep) {
-            $pos = mb_strpos($title, $sep);
-            if ($pos !== false && $pos >= 8 && $pos <= $max) {
-                return mb_substr($title, 0, $pos);
-            }
-        }
-        // Word-boundary truncation
-        $slice = mb_substr($title, 0, $max + 1);
-        $lastSpace = mb_strrpos($slice, ' ');
-        if ($lastSpace !== false && $lastSpace >= (int) floor($max * 0.6)) {
-            return rtrim(mb_substr($slice, 0, $lastSpace));
-        }
-        return mb_substr($title, 0, $max);
     }
 
     private function buildFocusKeyphraseFromTitle(string $title, string $lang): string

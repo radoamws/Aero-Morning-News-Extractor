@@ -20,8 +20,12 @@ class OpenAIService
      */
     public function generateFrenchTitle(string $emailContent): ?string
     {
-        $prompt = $this->buildTitlePrompt($emailContent, 'FR');
-        return $this->sanitizeTitle($this->callOpenAI($prompt, 80), $emailContent, 'FR');
+        return $this->generateTitlePayload($emailContent, $this->extractFallbackTitleFromContent($emailContent, 'FR'), 'FR')['optimized'];
+    }
+
+    public function generateFrenchTitlePayload(string $emailContent, string $originalTitle): array
+    {
+        return $this->generateTitlePayload($emailContent, $originalTitle, 'FR');
     }
 
     /**
@@ -29,26 +33,32 @@ class OpenAIService
      */
     public function generateEnglishTitle(string $emailContent): ?string
     {
-        $prompt = $this->buildTitlePrompt($emailContent, 'EN');
-        return $this->sanitizeTitle($this->callOpenAI($prompt, 80), $emailContent, 'EN');
+        return $this->generateTitlePayload($emailContent, $this->extractFallbackTitleFromContent($emailContent, 'EN'), 'EN')['optimized'];
+    }
+
+    public function generateEnglishTitlePayload(string $emailContent, string $originalTitle): array
+    {
+        return $this->generateTitlePayload($emailContent, $originalTitle, 'EN');
     }
 
     /**
      * Generate French content
      */
-    public function generateFrenchContent(string $emailContent, string $titleFr): ?string
+    public function generateFrenchContent(string $emailContent, string $titleFr, ?string $originalTitleFr = null): ?string
     {
-        $prompt = $this->buildContentPrompt($emailContent, $titleFr, 'FR');
-        return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleFr, 'FR');
+        $prompt = $this->buildContentPrompt($emailContent, $titleFr, $originalTitleFr, 'FR');
+        $displayTitle = $this->resolveContentH2Title($titleFr, $originalTitleFr);
+        return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $displayTitle, 'FR');
     }
 
     /**
      * Generate English content
      */
-    public function generateEnglishContent(string $emailContent, string $titleEn): ?string
+    public function generateEnglishContent(string $emailContent, string $titleEn, ?string $originalTitleEn = null): ?string
     {
-        $prompt = $this->buildContentPrompt($emailContent, $titleEn, 'EN');
-        return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleEn, 'EN');
+        $prompt = $this->buildContentPrompt($emailContent, $titleEn, $originalTitleEn, 'EN');
+        $displayTitle = $this->resolveContentH2Title($titleEn, $originalTitleEn);
+        return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $displayTitle, 'EN');
     }
 
     /**
@@ -243,20 +253,25 @@ EXEMPLE VALIDE :
         );
     }
 
-    private function buildTitlePrompt(string $content, string $lang): string
+    private function buildTitlePrompt(string $content, string $originalTitle, string $lang): string
     {
         $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
 
+        $cleanOriginalTitle = $this->sanitizePlainText($originalTitle);
+
         return "You are an aviation editor.\n"
             . "Write ONE compelling SEO news title in {$language} from the article text below.\n"
+            . "ORIGINAL SOURCE TITLE: {$cleanOriginalTitle}\n"
             . "Rules:\n"
             . "- Use only the {$language} article section.\n"
             . "- Ignore email chrome, confidentiality notices, styles, signatures, reply chains and bilingual sections in the other language.\n"
             . "- The title must be clear, specific, attractive and newsworthy.\n"
             . "- Strict maximum: 62 characters (including spaces).\n"
-            . "- IMPORTANT: You are NOT allowed to truncate or cut the title.\n"
-            . "- If the best title exceeds 62 characters, you MUST fully REWRITE it.\n"
-            . "- The rewrite must preserve meaning but use a shorter phrasing.\n"
+            . "- IMPORTANT: You are NOT allowed to truncate, crop, clip, or cut the title.\n"
+            . "- If the original source title is already clear and 62 characters or fewer, keep its meaning and wording as close as possible.\n"
+            . "- If the original source title exceeds 62 characters, you MUST fully REWRITE it into a shorter SEO headline.\n"
+            . "- The rewrite must preserve the exact news meaning and the main aviation entities.\n"
+            . "- Prefer reformulation, compression, and stronger wording instead of shortening.\n"
             . "- Never output incomplete phrases or cut sentences under any circumstances.\n"
             . "- Never end with conjunctions (and, or), prepositions (to, for, of, in), or unfinished ideas.\n"
             . "- The output must always be a complete grammatical sentence fragment suitable as a headline.\n"
@@ -266,9 +281,12 @@ EXEMPLE VALIDE :
             . $content;
     }
 
-    private function buildContentPrompt(string $content, string $title, string $lang): string
+    private function buildContentPrompt(string $content, string $title, ?string $originalTitle, string $lang): string
     {
         $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+        $originalTitle = $this->sanitizePlainText($originalTitle ?? $title);
+        $optimizedTitle = $this->sanitizePlainText($title);
+        $h2Title = $this->resolveContentH2Title($optimizedTitle, $originalTitle);
 
         return "You are an aviation news extractor.\n"
             . "Extract ONLY the main {$language} news article from the text below.\n"
@@ -286,12 +304,11 @@ EXEMPLE VALIDE :
             . "- Return HTML only.\n\n"
 
             . "TITLE HANDLING RULE (VERY IMPORTANT):\n"
-            . "- You MUST decide how to display the title based on its nature.\n"
-            . "- If the provided title is ORIGINAL and NOT modified: render it exactly as <h2>{$title}</h2>.\n"
-            . "- If the provided title has been REWRITTEN because it exceeds 62 characters:\n"
-            . "  - Then you MUST output the ORIGINAL TITLE (unmodified) inside <h2>...</h2>.\n"
-            . "  - Do NOT use the rewritten title inside <h2>.\n"
-            . "- Never alter, shorten, or paraphrase any title inside <h2>.\n"
+            . "- OPTIMIZED SEO TITLE: {$optimizedTitle}\n"
+            . "- ORIGINAL SOURCE TITLE: {$originalTitle}\n"
+            . "- REQUIRED H2 TITLE: {$h2Title}\n"
+            . "- You MUST render exactly <h2>{$h2Title}</h2> at the start.\n"
+            . "- Never alter, shorten, paraphrase, or replace the H2 title.\n"
             . "- The content must always start immediately after the <h2> title with no extra text.\n\n"
 
             . "CONTENT STRUCTURE RULE:\n"
@@ -332,18 +349,27 @@ EXEMPLE VALIDE :
             . strip_tags($content);
     }
 
-    private function sanitizeTitle(?string $title, string $fallbackContent, string $lang): ?string
+    private function sanitizeTitle(?string $title, string $originalTitle, string $fallbackContent, string $lang): ?string
     {
         $fallbackTitle = $this->extractFallbackTitleFromContent($fallbackContent, $lang);
+        $normalizedOriginalTitle = $this->normalizeTitleCandidate($originalTitle);
+        $candidate = $this->normalizeTitleCandidate($title ?? '');
 
-        $text = $this->sanitizePlainText($title ?? '');
-        if ($text === '') {
-            $text = $fallbackTitle;
+        if ($normalizedOriginalTitle !== '' && mb_strlen($normalizedOriginalTitle) <= 62 && $this->isValidOptimizedTitle($normalizedOriginalTitle)) {
+            return $normalizedOriginalTitle;
         }
 
-        $text = preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $text) ?? $text;
-        $text = preg_replace('/\s*[-|:]\s*(version|v)\s*\d+$/i', '', $text) ?? $text;
-        return $this->smartLimit($text, 62);
+        if ($candidate !== '' && $this->isValidOptimizedTitle($candidate)) {
+            return $candidate;
+        }
+
+        $rewriteSource = $candidate !== '' ? $candidate : ($normalizedOriginalTitle !== '' ? $normalizedOriginalTitle : $fallbackTitle);
+        $rewritten = $this->rewriteTitleToFit($rewriteSource, $fallbackContent, $lang);
+        if ($rewritten !== '') {
+            return $rewritten;
+        }
+
+        return $this->buildTitleFallbackWithoutTruncation($normalizedOriginalTitle !== '' ? $normalizedOriginalTitle : $fallbackTitle, $lang);
     }
 
     private function sanitizeHtmlArticle(?string $html, string $fallbackContent, string $title, string $lang): ?string
@@ -510,6 +536,131 @@ EXEMPLE VALIDE :
         return trim($text);
     }
 
+    private function generateTitlePayload(string $emailContent, string $originalTitle, string $lang): array
+    {
+        $cleanOriginalTitle = $this->normalizeTitleCandidate($originalTitle);
+        if ($cleanOriginalTitle === '') {
+            $cleanOriginalTitle = $this->extractFallbackTitleFromContent($emailContent, $lang);
+        }
+
+        $prompt = $this->buildTitlePrompt($emailContent, $cleanOriginalTitle, $lang);
+        $optimizedTitle = $this->sanitizeTitle($this->callOpenAI($prompt, 80), $cleanOriginalTitle, $emailContent, $lang);
+
+        if (!$optimizedTitle) {
+            $optimizedTitle = $this->buildTitleFallbackWithoutTruncation($cleanOriginalTitle, $lang);
+        }
+
+        return [
+            'original' => $cleanOriginalTitle,
+            'optimized' => $optimizedTitle,
+            'use_original_in_h2' => mb_strlen($cleanOriginalTitle) > 62,
+        ];
+    }
+
+    private function resolveContentH2Title(string $optimizedTitle, ?string $originalTitle): string
+    {
+        $cleanOriginalTitle = $this->normalizeTitleCandidate($originalTitle ?? '');
+        if ($cleanOriginalTitle !== '' && mb_strlen($cleanOriginalTitle) > 62) {
+            return $cleanOriginalTitle;
+        }
+
+        return $this->normalizeTitleCandidate($optimizedTitle);
+    }
+
+    private function normalizeTitleCandidate(string $title): string
+    {
+        $title = $this->sanitizePlainText($title);
+        $title = preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $title) ?? $title;
+        $title = preg_replace('/\s*[-|:]\s*(version|v)\s*\d+$/i', '', $title) ?? $title;
+        return trim($title, " ,;:-");
+    }
+
+    private function isValidOptimizedTitle(string $title): bool
+    {
+        if ($title === '' || mb_strlen($title) > 62) {
+            return false;
+        }
+
+        if (preg_match('/\.\.\.|…$/u', $title) === 1) {
+            return false;
+        }
+
+        return !$this->endsWithDanglingTitleWord($title);
+    }
+
+    private function endsWithDanglingTitleWord(string $title): bool
+    {
+        $lastWord = mb_strtolower((string) preg_replace('/^.*\s/u', '', trim($title)));
+
+        $danglingWords = [
+            'and', 'or', 'to', 'for', 'of', 'in', 'on', 'with', 'without', 'from', 'by',
+            'et', 'ou', 'de', 'du', 'des', 'dans', 'sur', 'pour', 'avec', 'sans', 'chez',
+        ];
+
+        return in_array($lastWord, $danglingWords, true);
+    }
+
+    private function rewriteTitleToFit(string $sourceTitle, string $content, string $lang): string
+    {
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+        $prompt = "Rewrite this aviation news title in {$language}.\n"
+            . "SOURCE TITLE: " . $this->normalizeTitleCandidate($sourceTitle) . "\n"
+            . "Rules:\n"
+            . "- Maximum 62 characters including spaces.\n"
+            . "- Preserve the exact meaning and the key aviation entities.\n"
+            . "- Do not truncate, crop, or end on an incomplete word.\n"
+            . "- Do not use ellipsis.\n"
+            . "- Return only the rewritten title.\n\n"
+            . $content;
+
+        $rewritten = $this->normalizeTitleCandidate($this->callOpenAI($prompt, 60) ?? '');
+        if ($this->isValidOptimizedTitle($rewritten)) {
+            return $rewritten;
+        }
+
+        return '';
+    }
+
+    private function buildTitleFallbackWithoutTruncation(string $sourceTitle, string $lang): string
+    {
+        $sourceTitle = $this->normalizeTitleCandidate($sourceTitle);
+        if ($this->isValidOptimizedTitle($sourceTitle)) {
+            return $sourceTitle;
+        }
+
+        foreach ([' : ', ' – ', ' - ', ' | ', ' — ', '; '] as $separator) {
+            $parts = array_values(array_filter(array_map('trim', explode($separator, $sourceTitle)), static fn ($part) => $part !== ''));
+            foreach ($parts as $part) {
+                if ($this->isValidOptimizedTitle($part)) {
+                    return $part;
+                }
+            }
+        }
+
+        $words = preg_split('/\s+/', $sourceTitle) ?: [];
+        $compressed = [];
+        foreach ($words as $word) {
+            $candidate = trim(implode(' ', [...$compressed, $word]));
+            if (mb_strlen($candidate) > 62) {
+                break;
+            }
+            $compressed[] = $word;
+        }
+
+        $fallback = trim(implode(' ', $compressed));
+        while ($fallback !== '' && $this->endsWithDanglingTitleWord($fallback)) {
+            $segments = preg_split('/\s+/', $fallback) ?: [];
+            array_pop($segments);
+            $fallback = trim(implode(' ', $segments));
+        }
+
+        if ($this->isValidOptimizedTitle($fallback)) {
+            return $fallback;
+        }
+
+        return $lang === 'FR' ? 'Actualite aviation' : 'Aviation news update';
+    }
+
     private function smartLimit(string $text, int $maxLength): string
     {
         $text = trim($text);
@@ -610,7 +761,7 @@ EXEMPLE VALIDE :
     {
         try {
             $response = $this->client->chat()->create([
-                'model' => env('OPENAI_MODEL', 'gpt-4-turbo-preview'),
+                'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
                 'messages' => [
                     [
                         'role' => 'user',
