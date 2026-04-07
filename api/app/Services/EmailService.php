@@ -196,16 +196,90 @@ class EmailService
      */
     public function extractImageUrlFromHtml(string $html): ?string
     {
-        // Look for img tags
-        if (preg_match('/<img[^>]+src=["\']([^"\']+)["\'][^>]*>/i', $html, $matches)) {
-            return $matches[1];
+        $preferredRelativeCandidates = [];
+
+        // Look for img tags and skip internal/header/footer assets.
+        if (preg_match_all('/<img\b[^>]*>/i', $html, $matches)) {
+            foreach ($matches[0] as $imgTag) {
+                if (!preg_match('/\bsrc=["\']([^"\']+)["\']/i', $imgTag, $srcMatch)) {
+                    continue;
+                }
+
+                $url = (string) $srcMatch[1];
+                if ($this->isForbiddenInlineImageUrl($url, $imgTag)) {
+                    continue;
+                }
+
+                if ($this->isRelativeImageUrl($url)) {
+                    $preferredRelativeCandidates[] = $url;
+                    continue;
+                }
+
+                return $url;
+            }
         }
 
-        // Look for image links
-        if (preg_match('/<a[^>]+href=["\']([^"\']+\.(?:jpg|jpeg|png|gif))["\'][^>]*>/i', $html, $matches)) {
-            return $matches[1];
+        // Look for image links and skip internal AMWS assets.
+        if (preg_match_all('/<a[^>]+href=["\']([^"\']+\.(?:jpg|jpeg|png|gif|webp))(?:\?[^"\']*)?["\'][^>]*>/i', $html, $matches)) {
+            foreach ($matches[1] as $url) {
+                if (!$this->isForbiddenInlineImageUrl((string) $url)) {
+                    return $url;
+                }
+            }
+        }
+
+        foreach ($preferredRelativeCandidates as $url) {
+            if (!$this->isForbiddenInlineImageUrl($url)) {
+                return $url;
+            }
         }
 
         return null;
+    }
+
+    private function isForbiddenInlineImageUrl(string $url, string $imgTag = ''): bool
+    {
+        $normalizedUrl = strtolower(trim($url));
+        $normalizedTag = strtolower(trim($imgTag));
+
+        if ($normalizedUrl === '') {
+            return true;
+        }
+
+        if (
+            str_contains($normalizedUrl, 'amws.space')
+            || str_contains($normalizedUrl, 'amws')
+            || str_contains($normalizedUrl, 'hc-undulydeepcolt-eu.n0c.com')
+        ) {
+            return true;
+        }
+
+        if ($this->isRelativeImageUrl($normalizedUrl)) {
+            if ($normalizedTag === '') {
+                return true;
+            }
+
+            if (preg_match('/logo|header|footer|icon|social|linkedin|facebook|twitter|instagram|youtube|banner|banniere|webmail|roundcube|amws|aeromorning|thales/i', $normalizedTag) === 1) {
+                return true;
+            }
+
+            if (preg_match('/logo|header|footer|icon|social|linkedin|facebook|twitter|instagram|youtube|banner|banniere|webmail|roundcube|amws|aeromorning|thales/i', $normalizedUrl) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isRelativeImageUrl(string $url): bool
+    {
+        $url = trim($url);
+        if ($url === '') {
+            return false;
+        }
+
+        return !preg_match('/^[a-z][a-z0-9+.-]*:\/\//i', $url)
+            && !str_starts_with($url, 'cid:')
+            && !str_starts_with($url, 'data:');
     }
 }

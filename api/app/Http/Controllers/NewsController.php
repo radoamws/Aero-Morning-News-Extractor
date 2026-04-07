@@ -15,6 +15,10 @@ use DOMDocument;
 
 class NewsController extends Controller
 {
+    private const EMAIL_RESULT_PROCESSED = 'processed';
+    private const EMAIL_RESULT_FAILED = 'failed';
+    private const EMAIL_RESULT_SKIPPED = 'skipped';
+
     private ?EmailService $emailService = null;
     private ?ImageService $imageService = null;
     private ?OpenAIService $openaiService = null;
@@ -91,17 +95,24 @@ class NewsController extends Controller
                 return response()->json([
                     'success' => true,
                     'message' => 'No emails to process for current IMAP criteria',
-                    'processed' => 0
+                    'processed' => 0,
+                    'failed' => 0,
+                    'skipped' => 0,
                 ]);
             }
 
             $processedCount = 0;
             $failedCount = 0;
+            $skippedCount = 0;
 
             foreach ($emails as $mail) {
                 try {
-                    if ($this->processSingleEmail($mail)) {
+                    $result = $this->processSingleEmail($mail);
+
+                    if ($result === self::EMAIL_RESULT_PROCESSED) {
                         $processedCount++;
+                    } elseif ($result === self::EMAIL_RESULT_SKIPPED) {
+                        $skippedCount++;
                     } else {
                         $failedCount++;
                     }
@@ -115,7 +126,8 @@ class NewsController extends Controller
                 'success' => true,
                 'message' => 'Email processing completed',
                 'processed' => $processedCount,
-                'failed' => $failedCount
+                'failed' => $failedCount,
+                'skipped' => $skippedCount,
             ]);
         } catch (\Throwable $e) {
             Log::error('Error in email processing: ' . $e->getMessage());
@@ -129,7 +141,7 @@ class NewsController extends Controller
     /**
      * Process a single email
      */
-    private function processSingleEmail($mail): bool
+    private function processSingleEmail($mail): string
     {
         try {
             // Extract email content
@@ -149,6 +161,13 @@ class NewsController extends Controller
                 : $emailContent['text_body'];
             $normalizedBodyContent = $this->normalizeEmailBody($bodyContent);
             $languageDetectionText = $this->normalizePlainTextContent(strip_tags($normalizedBodyContent));
+
+            if (!$this->openaiService->isAviationRelevant($languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent)) {
+                Log::info('Skipping non-aviation email: ' . ($emailContent['subject'] ?? 'no-subject'));
+                $this->emailService->markAsRead($mail->id);
+                return self::EMAIL_RESULT_SKIPPED;
+            }
+
             $imageUrl = null;
             if ($this->emailService->hasAttachments($mail)) {
                 $bestAttachment = $this->selectBestImageAttachment($mail->getAttachments());
@@ -217,21 +236,21 @@ class NewsController extends Controller
             }
 
             if (!$createdAny && !empty($existingLangs)) {
-                return true;
+                return self::EMAIL_RESULT_SKIPPED;
             }
 
             if (!$createdAny) {
                 Log::warning('No news generated for email: ' . ($emailContent['message_id'] ?: 'no-message-id'));
-                return false;
+                return self::EMAIL_RESULT_FAILED;
             }
 
             // Mark email as read
             $this->emailService->markAsRead($mail->id);
 
-            return true;
+            return self::EMAIL_RESULT_PROCESSED;
         } catch (\Throwable $e) {
             Log::error("Error processing single email: " . $e->getMessage());
-            return false;
+            return self::EMAIL_RESULT_FAILED;
         }
     }
 
@@ -256,7 +275,7 @@ class NewsController extends Controller
                 : ($titlePayloadFr['optimized'] ?? $originalTitle);
 
             if (!$titleFr) {
-                $titleFr = $this->fallbackTitle($subject, 'FR');
+                $titleFr = $this->fallbackTitle($subject, $originalTitle, 'FR');
                 $h2TitleFr = mb_strlen($originalTitle) > 62 ? $originalTitle : $titleFr;
                 Log::warning("Failed to generate French title, using fallback title");
             }
@@ -330,7 +349,7 @@ class NewsController extends Controller
                 : ($titlePayloadEn['optimized'] ?? $originalTitle);
 
             if (!$titleEn) {
-                $titleEn = $this->fallbackTitle($subject, 'EN');
+                $titleEn = $this->fallbackTitle($subject, $originalTitle, 'EN');
                 $h2TitleEn = mb_strlen($originalTitle) > 62 ? $originalTitle : $titleEn;
                 Log::warning("Failed to generate English title, using fallback title");
             }
@@ -425,14 +444,58 @@ class NewsController extends Controller
         return $languages;
     }
 
-    private function fallbackTitle(string $subject, string $lang): string
+    private function fallbackTitle(string $subject, string $originalTitle, string $lang): string
     {
-        $clean = trim((string) preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $subject));
-        if ($clean === '') {
-            $clean = $lang === 'EN' ? 'Aviation News Update' : 'Actualite aviation';
+        $candidates = [
+            $this->normalizeFallbackTitleCandidate($originalTitle),
+            $this->normalizeFallbackTitleCandidate($subject),
+        ];
+
+        foreach ($candidates as $candidate) {
+            if ($candidate === '') {
+                continue;
+            }
+
+            if (mb_strlen($candidate) <= 62) {
+                return $candidate;
+            }
+
+            $limited = $this->limitFallbackTitle($candidate, 62);
+            if ($limited !== '') {
+                return $limited;
+            }
         }
 
-        return mb_substr($clean, 0, 53);
+        return '';
+    }
+
+    private function normalizeFallbackTitleCandidate(string $value): string
+    {
+        $clean = trim((string) preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $value));
+        $clean = preg_replace('/\s*[-|:]\s*(version|v)\s*\d+$/i', '', $clean) ?? $clean;
+        return trim((string) $clean, " ,;:-");
+    }
+
+    private function limitFallbackTitle(string $title, int $maxLength): string
+    {
+        $title = trim($title);
+        if ($title === '') {
+            return '';
+        }
+
+        if (mb_strlen($title) <= $maxLength) {
+            return $title;
+        }
+
+        $slice = trim(mb_substr($title, 0, $maxLength + 1));
+        $lastSpace = mb_strrpos($slice, ' ');
+        $limited = $lastSpace !== false
+            ? trim(mb_substr($slice, 0, $lastSpace))
+            : trim(mb_substr($title, 0, $maxLength));
+
+        $limited = preg_replace('/\b(and|or|to|for|of|in|on|with|without|from|by|et|ou|de|du|des|dans|sur|pour|avec|sans|chez)\s*$/iu', '', $limited) ?? $limited;
+
+        return trim((string) $limited, " ,;:-");
     }
 
     private function fallbackContent(string $rawContent, string $title, string $lang): string
@@ -680,6 +743,25 @@ class NewsController extends Controller
     private function isBoilerplateLine(string $line): bool
     {
         $patterns = [
+            '/^top of form$/i',
+            '/^bottom of form$/i',
+            '/^posted by\s*:/i',
+            '/^related articles$/i',
+            '/^be the first to comment/i',
+            '/^leave a comment$/i',
+            '/^additional links$/i',
+            '/^topics\s*:/i',
+            '/^rechercher\s*:/i',
+            '/^copyright\s+/i',
+            '/^dernieres news$/i',
+            '/^derni[eè]res news$/iu',
+            '/^mots cl[eé]$/iu',
+            '/^[éè]v[eè]nements [àa] venir$/iu',
+            '/^flash news$/i',
+            '/^facebook$/i',
+            '/^twitter$/i',
+            '/^linkedin$/i',
+            '/^youtube$/i',
             '/^niveau de confidentialite/i',
             '/^rado\s+rakotoarivelo/i',
             '/^a\s*:\s*route royale/i',
@@ -769,6 +851,7 @@ class NewsController extends Controller
             if (
                 $line === ''
                 || str_starts_with($line, '•')
+                || $this->isInvalidTitleCandidate($line)
                 || preg_match('/^aeromorning\b/i', $line)
                 || preg_match('/^[0-9]+[.)]/', $line)
                 || preg_match('/^(version|source)\b/i', $line)
@@ -780,7 +863,36 @@ class NewsController extends Controller
             return trim(preg_replace('/\s+/', ' ', $line) ?? $line);
         }
 
-        return $this->fallbackTitle($subject, $lang);
+        return $this->fallbackTitle($subject, '', $lang);
+    }
+
+    private function isInvalidTitleCandidate(string $line): bool
+    {
+        $candidate = trim($line);
+        if ($candidate === '') {
+            return true;
+        }
+
+        if ($this->isBoilerplateLine($candidate)) {
+            return true;
+        }
+
+        $invalidPatterns = [
+            '/^(top|bottom) of form$/i',
+            '/^posted by\s*:/i',
+            '/^related articles$/i',
+            '/^source\s*:/i',
+            '/^flash news$/i',
+            '/^additional links$/i',
+        ];
+
+        foreach ($invalidPatterns as $pattern) {
+            if (preg_match($pattern, $candidate) === 1) {
+                return true;
+            }
+        }
+
+        return mb_strlen($candidate) < 12;
     }
 
     private function detectArticleSource(string $content, string $from): string
@@ -1155,6 +1267,7 @@ class NewsController extends Controller
 
         $articleText = $this->normalizeSearchText($title . ' ' . strip_tags($contentHtml));
         $ordered = [];
+        $seenTagNames = [];
 
         foreach ($selectedIds as $index => $tagId) {
             if (!isset($tagMap[$tagId])) {
@@ -1163,6 +1276,11 @@ class NewsController extends Controller
 
             $tagName = (string) $tagMap[$tagId]['tag_name'];
             $normalizedTag = $this->normalizeSearchText($tagName);
+            $canonicalTag = $this->canonicalizeTagName($normalizedTag);
+
+            if ($canonicalTag === '' || isset($seenTagNames[$canonicalTag])) {
+                continue;
+            }
 
             $priority = 3;
             foreach ($selectedCategoryNames as $categoryName) {
@@ -1185,6 +1303,8 @@ class NewsController extends Controller
                 'priority' => $priority,
                 'position' => $index,
             ];
+
+            $seenTagNames[$canonicalTag] = true;
         }
 
         usort($ordered, static function (array $left, array $right): int {
@@ -1192,6 +1312,20 @@ class NewsController extends Controller
         });
 
         return implode(',', array_map(static fn (array $item) => $item['id'], $ordered));
+    }
+
+    private function canonicalizeTagName(string $tagName): string
+    {
+        $tagName = trim($tagName);
+        if ($tagName === '') {
+            return '';
+        }
+
+        $tagName = preg_replace('/\b(news|actualites|actualite)\b/iu', '', $tagName) ?? $tagName;
+        $tagName = preg_replace('/\s+/', ' ', trim($tagName)) ?? trim($tagName);
+        $tagName = preg_replace('/s\b/u', '', $tagName) ?? $tagName;
+
+        return trim($tagName);
     }
 
     private function normalizeSearchText(string $text): string

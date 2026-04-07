@@ -253,6 +253,33 @@ EXEMPLE VALIDE :
         );
     }
 
+    public function isAviationRelevant(string $content): bool
+    {
+        $plainContent = $this->sanitizePlainText($content);
+        if ($plainContent === '') {
+            return false;
+        }
+
+        $excerpt = mb_substr($plainContent, 0, 4000);
+
+        $prompt = "You are filtering incoming emails for an aviation news workflow.\n"
+            . "Decide whether the content below contains a real aviation, aerospace, airline, airport, aircraft, defense aviation, air transport, or space news article that is relevant for publication.\n"
+            . "Reject emails that are mainly signatures, admin exchanges, personal messages, legal notices, generic business messages, marketing unrelated to aviation, or content without a real publishable aviation news story.\n"
+            . "Return only one word: YES or NO.\n\n"
+            . $excerpt;
+
+        $response = mb_strtoupper(trim((string) $this->callOpenAI($prompt, 5)));
+        if ($response === 'YES') {
+            return true;
+        }
+
+        if ($response === 'NO') {
+            return false;
+        }
+
+        return $this->matchesAviationHeuristic($plainContent);
+    }
+
     private function buildTitlePrompt(string $content, string $originalTitle, string $lang): string
     {
         $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
@@ -265,10 +292,12 @@ EXEMPLE VALIDE :
             . "Rules:\n"
             . "- Use only the {$language} article section.\n"
             . "- Ignore email chrome, confidentiality notices, styles, signatures, reply chains and bilingual sections in the other language.\n"
+            . "- Ignore transfer/page boilerplate such as Top of Form, Bottom of Form, Related Articles, Leave a comment, Topics, Flash News.\n"
             . "- The title must be clear, specific, attractive and newsworthy.\n"
             . "- Strict maximum: 62 characters (including spaces).\n"
             . "- The title must be a short descriptive phrase, not a single entity or keyword.\n"
             . "- Minimum target: 4 words when possible. Never return only 1 or 2 words.\n"
+            . "- The title must be directly supported by the first meaningful lines of the article content.\n"
             . "- IMPORTANT: You are NOT allowed to truncate, crop, clip, or cut the title.\n"
             . "- If the original source title is already clear and 62 characters or fewer, keep its meaning and wording as close as possible.\n"
             . "- If the original source title exceeds 62 characters, you MUST fully REWRITE it into a shorter SEO headline.\n"
@@ -357,11 +386,11 @@ EXEMPLE VALIDE :
         $normalizedOriginalTitle = $this->normalizeTitleCandidate($originalTitle);
         $candidate = $this->normalizeTitleCandidate($title ?? '');
 
-        if ($normalizedOriginalTitle !== '' && mb_strlen($normalizedOriginalTitle) <= 62 && $this->isValidOptimizedTitle($normalizedOriginalTitle)) {
+        if ($normalizedOriginalTitle !== '' && mb_strlen($normalizedOriginalTitle) <= 62 && $this->isValidOptimizedTitle($normalizedOriginalTitle) && $this->isTitleRelatedToContent($normalizedOriginalTitle, $fallbackContent)) {
             return $normalizedOriginalTitle;
         }
 
-        if ($candidate !== '' && $this->isValidOptimizedTitle($candidate)) {
+        if ($candidate !== '' && $this->isValidOptimizedTitle($candidate) && $this->isTitleRelatedToContent($candidate, $fallbackContent)) {
             return $candidate;
         }
 
@@ -637,7 +666,7 @@ EXEMPLE VALIDE :
             . $content;
 
         $rewritten = $this->normalizeTitleCandidate($this->callOpenAI($prompt, 60) ?? '');
-        if ($this->isValidOptimizedTitle($rewritten)) {
+        if ($this->isValidOptimizedTitle($rewritten) && $this->isTitleRelatedToContent($rewritten, $content)) {
             return $rewritten;
         }
 
@@ -647,14 +676,14 @@ EXEMPLE VALIDE :
     private function buildTitleFallbackWithoutTruncation(string $sourceTitle, string $lang): string
     {
         $sourceTitle = $this->normalizeTitleCandidate($sourceTitle);
-        if ($this->isValidOptimizedTitle($sourceTitle)) {
+        if ($this->isValidOptimizedTitle($sourceTitle) && !$this->isForbiddenTitleCandidate($sourceTitle)) {
             return $sourceTitle;
         }
 
         foreach ([' : ', ' – ', ' - ', ' | ', ' — ', '; '] as $separator) {
             $parts = array_values(array_filter(array_map('trim', explode($separator, $sourceTitle)), static fn ($part) => $part !== ''));
             foreach ($parts as $part) {
-                if ($this->isValidOptimizedTitle($part)) {
+                if ($this->isValidOptimizedTitle($part) && !$this->isForbiddenTitleCandidate($part)) {
                     return $part;
                 }
             }
@@ -677,11 +706,11 @@ EXEMPLE VALIDE :
             $fallback = trim(implode(' ', $segments));
         }
 
-        if ($this->isValidOptimizedTitle($fallback)) {
+        if ($this->isValidOptimizedTitle($fallback) && !$this->isForbiddenTitleCandidate($fallback)) {
             return $fallback;
         }
 
-        return $lang === 'FR' ? 'Actualite aviation' : 'Aviation news update';
+        return $sourceTitle;
     }
 
     private function smartLimit(string $text, int $maxLength): string
@@ -713,6 +742,7 @@ EXEMPLE VALIDE :
                 && !str_starts_with($line, '•')
                 && !preg_match('/^aeromorning\b/i', $line)
                 && !preg_match('/^[0-9]+[.)]/', $line)
+                && !$this->isForbiddenTitleCandidate($line)
                 && !$this->looksLikeAddressLine($line)
             ) {
                 return $line;
@@ -727,7 +757,7 @@ EXEMPLE VALIDE :
             }
         }
 
-        return $lang === 'FR' ? 'Actualite aviation' : 'Aviation news update';
+        return '';
     }
 
     private function looksLikeAddressLine(string $line): bool
@@ -742,6 +772,65 @@ EXEMPLE VALIDE :
 
         $parts = array_filter(array_map('trim', explode(',', $line)), static fn ($part) => $part !== '');
         return count($parts) >= 3;
+    }
+
+    private function isForbiddenTitleCandidate(string $title): bool
+    {
+        $title = mb_strtolower(trim($title));
+        if ($title === '') {
+            return true;
+        }
+
+        $forbiddenPatterns = [
+            '/^(top|bottom) of form$/i',
+            '/^related articles$/i',
+            '/^leave a comment$/i',
+            '/^additional links$/i',
+            '/^topics\s*:/i',
+            '/^flash news$/i',
+            '/^posted by\s*:/i',
+            '/^source\s*:/i',
+        ];
+
+        foreach ($forbiddenPatterns as $pattern) {
+            if (preg_match($pattern, $title) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isTitleRelatedToContent(string $title, string $content): bool
+    {
+        if ($this->isForbiddenTitleCandidate($title)) {
+            return false;
+        }
+
+        $normalizedContent = mb_strtolower($this->sanitizePlainText($content));
+        if ($normalizedContent === '') {
+            return true;
+        }
+
+        $titleWords = preg_split('/\s+/', mb_strtolower($this->sanitizePlainText($title))) ?: [];
+        $titleWords = array_values(array_filter($titleWords, static function (string $word): bool {
+            return mb_strlen($word) >= 4 && !in_array($word, [
+                'avec', 'pour', 'dans', 'from', 'with', 'this', 'that', 'les', 'des', 'une', 'the', 'over', 'into', 'renforce'
+            ], true);
+        }));
+
+        if (empty($titleWords)) {
+            return false;
+        }
+
+        $matches = 0;
+        foreach ($titleWords as $word) {
+            if (str_contains($normalizedContent, $word)) {
+                $matches++;
+            }
+        }
+
+        return $matches >= min(2, count($titleWords));
     }
 
     private function extractKeyphraseFromContent(string $content, string $lang): string
@@ -790,6 +879,28 @@ EXEMPLE VALIDE :
         }
 
         return $this->sanitizePlainText(implode(' ', array_slice($usable, 0, 3)));
+    }
+
+    private function matchesAviationHeuristic(string $content): bool
+    {
+        $content = mb_strtolower($content);
+
+        $keywords = [
+            'aviation', 'aeronaut', 'aerosp', 'airline', 'airport', 'aircraft', 'flight', 'fleet',
+            'boeing', 'airbus', 'embraer', 'atr', 'engine', 'faa', 'easa', 'iata', 'icao',
+            'nasa', 'spacex', 'satellite', 'rocket', 'launch', 'orbital', 'lunar', 'air cargo',
+            'transport aerien', 'transport aérien', 'compagnie aerienne', 'compagnie aérienne',
+            'aeroport', 'aéroport', 'avion', 'vol', 'espace', 'spatial', 'helicopter', 'helicoptere', 'hélicoptère'
+        ];
+
+        $score = 0;
+        foreach ($keywords as $keyword) {
+            if (str_contains($content, $keyword)) {
+                $score++;
+            }
+        }
+
+        return $score >= 2;
     }
 
     /**
