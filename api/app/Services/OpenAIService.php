@@ -152,48 +152,95 @@ EXEMPLE VALIDE :
         }, $tags));
 
         $prompt = "RÔLE :
-Tu es un classificateur éditorial spécialisé en aéronautique et transport aérien.
+        Tu es un classificateur éditorial expert en aéronautique, aviation civile et industrie aérospatiale.
 
-CONTEXTE :
-Voici le contenu HTML brut d'une news aéronautique.
-Le texte peut être français et/ou anglais.
+        CONTEXTE :
+        Tu dois sélectionner uniquement les tags réellement pertinents pour une news aéronautique.
+        Le texte peut être en français et/ou anglais.
 
-CONTENU DE LA NEWS: 
-$newsContent
+        CONTENU DE LA NEWS:
+        $newsContent
 
-LISTE DES TAGS:
-$tagsList
+        LISTE DES TAGS DISPONIBLES:
+        $tagsList
 
-FILTRES D'EXCLUSION (OBLIGATOIRE) :
-Rejeter strictement:
-- Tous les tags contenant une DATE (2025, 2026, january, mars, Q1, etc)
-- Tous les tags non-pertinents pour AVIATION / AEROSPACE (ex: finance générale, politique générale, sport non-aérien)
+        ========================
+        FILTRES D'EXCLUSION STRICTS (IMPORTANT)
+        ========================
+        Tu dois REJETER absolument :
 
-PRIORITÉ ABSOLUE :
-Sélectionner UNIQUEMENT les tags pertinents pour: compagnies aériennes, avions, aéroports, fabricants, technologies aérospatiales, organismes aéronautiques.
+        - Tous les tags contenant une DATE explicite ou implicite :
+        (ex: 2024, 2025, 2026, jan, feb, march, april, may, june, july, aug, sept, oct, nov, dec, Q1, Q2, Q3, Q4)
+        - Tous les tags de temporalité :
+        (today, yesterday, this week, recent, update, breaking, etc.)
+        - Tous les tags NON liés directement à l’aviation / aerospace :
+        - finance générale
+        - politique générale
+        - sport non aérien
+        - technologie non aéronautique
+        - business général sans lien aérien
 
-MÉTHODE D'ANALYSE OBLIGATOIRE :
-1. Identifier les entités clés (compagnies aériennes, avions, fabricants, aéroports).
-2. Identifier les sujets spécifiques et les domaines concernés.
-3. Sélectionner UNIQUEMENT les tags directement pertinents ET pertinents pour aviation.
-4. Éliminer tout tag de date, politique générale, ou sans lien aéronautique.
-5. Ordonner les tags restants par priorité éditoriale.
+        ========================
+        PRIORITÉ ABSOLUE (ACCEPTÉS)
+        ========================
+        Tu dois privilégier UNIQUEMENT les tags liés à :
 
-ORDRE DE PRIORITÉ DES TAGS :
-- en premier : les tags qui recoupent les catégories retenues
-- ensuite : pays, ville, lieu, aéroport ou zone géographique
-- ensuite : société, compagnie, constructeur, organisme ou institution
-- enfin : les autres tags réellement utiles pour aviation
+        1. COMPAGNIES AÉRIENNES
+        - airlines, low-cost, cargo airlines
 
-FORMAT DE SORTIE :
-Retourne les wp_id que tu trouve et séparés par des virgules.
-Aucun texte supplémentaire et aucune lettre.
-Si aucun tag n'est applicable, retourne vide.
+        2. AÉRONEFS & TECHNOLOGIE
+        - aircraft models, engines, avionics, drones, satellites
 
-EXEMPLE VALIDE :
-1,3,7";
+        3. INDUSTRIE AÉROSPATIALE
+        - Airbus, Boeing, Embraer, SpaceX, etc.
 
-        return $this->sanitizeIdList($this->callOpenAI($prompt, 80), $tags, $newsContent, false, 'tag_name');
+        4. AÉROPORTS & INFRASTRUCTURES
+        - airports, ATC, air traffic systems
+
+        5. ORGANISATIONS & RÉGULATEURS
+        - ICAO, FAA, EASA, IATA, NASA, etc.
+
+        6. PAYS / RÉGIONS UNIQUEMENT SI CONTEXTE AÉRONAUTIQUE
+        - pays impliqué dans l’événement aviation
+
+        ========================
+        MÉTHODE D'ANALYSE OBLIGATOIRE
+        ========================
+        1. Identifier les entités aéronautiques principales (compagnies, avions, fabricants, aéroports).
+        2. Identifier les organisations et autorités impliquées.
+        3. Identifier les pays UNIQUEMENT s’ils sont directement liés à l’événement aérien.
+        4. Écarter tous les tags non directement liés à l’industrie aéronautique.
+        5. Ne garder que les tags ayant un lien direct avec le contenu de la news.
+        6. Classer les tags restants par pertinence éditoriale.
+
+        ========================
+        ORDRE DE PRIORITÉ DES TAGS
+        ========================
+        1. Entités principales aéronautiques (Airbus, Boeing, etc.)
+        2. Avions / technologies / programmes spatiaux
+        3. Compagnies aériennes
+        4. Aéroports / infrastructures
+        5. Organisations (FAA, EASA, ICAO, NASA…)
+        6. Pays UNIQUEMENT si essentiels au sujet
+
+        ========================
+        FORMAT DE SORTIE (TRÈS IMPORTANT)
+        ========================
+        - Retourne UNIQUEMENT les wp_id
+        - Séparés par des virgules
+        - Aucun texte, aucun mot, aucun espace
+        - Si aucun tag pertinent → retourne vide
+
+        EXEMPLE VALIDE :
+        1,3,7";
+
+        return $this->sanitizeIdList(
+            $this->callOpenAI($prompt, 80),
+            $tags,
+            $newsContent,
+            false,
+            'tag_name'
+        );
     }
 
     private function buildTitlePrompt(string $content, string $lang): string
@@ -206,12 +253,16 @@ EXEMPLE VALIDE :
             . "- Use only the {$language} article section.\n"
             . "- Ignore email chrome, confidentiality notices, styles, signatures, reply chains and bilingual sections in the other language.\n"
             . "- The title must be clear, specific, attractive and newsworthy.\n"
-            . "- Strict maximum: 62 characters.\n"
-            . "- If forced to truncate, rewrite naturally to avoid incomplete phrases like 'ends with and or: or - or comma'.\n"
-            . "- Never end with conjunctions (and, or), propositions (to, for), incomplete lists, or unfinished thoughts.\n"
-            . "- If longer, rewrite naturally; do not cut mid-word.\n"
+            . "- Strict maximum: 62 characters (including spaces).\n"
+            . "- IMPORTANT: You are NOT allowed to truncate or cut the title.\n"
+            . "- If the best title exceeds 62 characters, you MUST fully REWRITE it.\n"
+            . "- The rewrite must preserve meaning but use a shorter phrasing.\n"
+            . "- Never output incomplete phrases or cut sentences under any circumstances.\n"
+            . "- Never end with conjunctions (and, or), prepositions (to, for, of, in), or unfinished ideas.\n"
+            . "- The output must always be a complete grammatical sentence fragment suitable as a headline.\n"
+            . "- Do not use ellipsis (...) or any form of shortening marker.\n"
             . "- No HTML. No quotes. No prefix like RE/FW/TR.\n"
-            . "- Return only the title.\n\n"
+            . "- Return only the final title.\n\n"
             . $content;
     }
 
@@ -230,12 +281,23 @@ EXEMPLE VALIDE :
             . "- Convert numbered lists into proper <ol><li>...</li></ol>.\n"
             . "- Use <h2> for main sections and <h3> for subsections when the source structure justifies it.\n"
             . "- Use <p>, <ul>, <ol>, <li>, <a>, <strong>, <em>, <blockquote>, <h2>, <h3> only when relevant.\n"
-            . "- Start with the PROVIDED TITLE as-is (preserve complete original title): <h2>{$title}</h2>\n"
-            . "- Then immediately follow with the article content (NO INTERMEDIATE TEXT).\n"
-            . "- Do not truncate or modify the title in the <h2> tag.\n"
-            . "- Do not include CSS, <style>, <head>, <body>, <html>, tables, inline office markup or both languages.\n"
+            . "- Do not include CSS, <style>, <head>, <body>, <html>, tables, or office markup.\n"
             . "- Keep factual content only.\n"
             . "- Return HTML only.\n\n"
+
+            . "TITLE HANDLING RULE (VERY IMPORTANT):\n"
+            . "- You MUST decide how to display the title based on its nature.\n"
+            . "- If the provided title is ORIGINAL and NOT modified: render it exactly as <h2>{$title}</h2>.\n"
+            . "- If the provided title has been REWRITTEN because it exceeds 62 characters:\n"
+            . "  - Then you MUST output the ORIGINAL TITLE (unmodified) inside <h2>...</h2>.\n"
+            . "  - Do NOT use the rewritten title inside <h2>.\n"
+            . "- Never alter, shorten, or paraphrase any title inside <h2>.\n"
+            . "- The content must always start immediately after the <h2> title with no extra text.\n\n"
+
+            . "CONTENT STRUCTURE RULE:\n"
+            . "- After the <h2> title, immediately output the article content.\n"
+            . "- Do not insert any commentary or extra text between title and content.\n\n"
+
             . $content;
     }
 
