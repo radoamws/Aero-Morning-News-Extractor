@@ -1,0 +1,1 @@
+import{_ as s,o as t,c as a,a as c,I as o}from"./enGnRx0X.js";const r={},n={class:"auth-shell"},_={class:"auth-card"};function d(e,l){return t(),a("div",n,[c("div",_,[o(e.$slots,"default")])])}const h=s(r,[["render",d]]);export{h as default};

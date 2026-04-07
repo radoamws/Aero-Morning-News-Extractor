@@ -14,6 +14,13 @@ export const useNewsStore = defineStore("news", {
     selectedIds: [] as number[],
     loading: false,
     actionLoading: false,
+    isProcessing: false,
+    processProgress: {
+      current: 0,
+      total: 0,
+      stage: "idle", // "emails" | "publishing" | "idle"
+      message: ""
+    },
     message: "",
     error: "",
     pagination: {
@@ -32,7 +39,8 @@ export const useNewsStore = defineStore("news", {
       per_page: 20
     } as NewsFilters,
     stats: null as null | Record<string, any>,
-    preview: ""
+    preview: "",
+    previewItem: null as null | NewsItem
   }),
   getters: {
     allSelected(state) {
@@ -40,6 +48,35 @@ export const useNewsStore = defineStore("news", {
     },
     selectedCount(state) {
       return state.selectedIds.length;
+    },
+    previewSeoWarnings(state) {
+      if (!state.previewItem) return [];
+      const warnings: string[] = [];
+      
+      if (state.previewItem.title.length === 0) {
+        warnings.push("Title is empty");
+      } else if (state.previewItem.title.length > 62) {
+        warnings.push(`Title too long: ${state.previewItem.title.length}/62 chars`);
+      }
+      
+      if (state.previewItem.metadescription.length === 0) {
+        warnings.push("Meta description is empty");
+      } else if (state.previewItem.metadescription.length < 107) {
+        warnings.push(`Meta description too short: ${state.previewItem.metadescription.length}/107-142 chars`);
+      } else if (state.previewItem.metadescription.length > 142) {
+        warnings.push(`Meta description too long: ${state.previewItem.metadescription.length}/107-142 chars`);
+      }
+      
+      if (state.previewItem.focuskeyphrase.length === 0) {
+        warnings.push("Focus keyphrase is empty");
+      } else {
+        const words = state.previewItem.focuskeyphrase.trim().split(/\s+/).filter(w => w.length > 0);
+        if (words.length < 2 || words.length > 5) {
+          warnings.push(`Focus keyphrase word count: ${words.length} (must be 2-5 words)`);
+        }
+      }
+      
+      return warnings;
     }
   },
   actions: {
@@ -123,26 +160,68 @@ export const useNewsStore = defineStore("news", {
     async runProcessEmails() {
       const { request } = useApi();
       this.actionLoading = true;
+      this.isProcessing = true;
+      this.processProgress = {
+        current: 0,
+        total: 0,
+        stage: "emails",
+        message: "Connecting to IMAP server..."
+      };
+
       try {
+        // Simulate progress while waiting
+        let progressInterval = setInterval(() => {
+          if (this.processProgress.current < 95) {
+            this.processProgress.current += Math.random() * 15;
+            if (this.processProgress.current > 95) this.processProgress.current = 95;
+          }
+        }, 300);
+
         const result = await request<{ message: string; processed?: number; failed?: number }>("/process-emails", {
           method: "POST"
         });
+        clearInterval(progressInterval);
 
-        // Automatically chain publishing so freshly created status=0 rows are sent to WordPress.
+        this.processProgress.current = 100;
+        this.processProgress.message = `Emails processed (${result.processed ?? 0})`;
+
+        // Now publish
+        this.processProgress.stage = "publishing";
+        this.processProgress.current = 0;
+        this.processProgress.message = "Publishing to WordPress...";
+
+        progressInterval = setInterval(() => {
+          if (this.processProgress.current < 95) {
+            this.processProgress.current += Math.random() * 15;
+            if (this.processProgress.current > 95) this.processProgress.current = 95;
+          }
+        }, 300);
+
         const publishResult = await request<{ message: string; published?: number; failed?: number }>("/publish-pending", {
           method: "POST"
         });
+        clearInterval(progressInterval);
 
+        this.processProgress.current = 100;
         const details =
           ` (emails processed: ${result.processed ?? 0}, emails failed: ${result.failed ?? 0}, ` +
           `published: ${publishResult.published ?? 0}, publish failed: ${publishResult.failed ?? 0})`;
 
-        this.setMessage((publishResult.message || "Traitement + publication termines") + details);
+        this.setMessage((publishResult.message || "Processing + publishing complete") + details);
         await Promise.all([this.fetchNews(), this.fetchStats()]);
       } catch (error: any) {
-        this.setError(error?.data?.message || "Echec traitement emails / publication");
+        this.setError(error?.data?.message || "Email processing or publishing failed");
       } finally {
-        this.actionLoading = false;
+        setTimeout(() => {
+          this.actionLoading = false;
+          this.isProcessing = false;
+          this.processProgress = {
+            current: 0,
+            total: 0,
+            stage: "idle",
+            message: ""
+          };
+        }, 1000);
       }
     },
     async runPublishPending() {
@@ -265,13 +344,21 @@ export const useNewsStore = defineStore("news", {
       const { request } = useApi();
       this.actionLoading = true;
       this.preview = "";
+      this.previewItem = null;
 
       try {
+        const item = this.rows.find(row => row.id === id);
+        if (!item) {
+          this.setError("News not found in current list");
+          return;
+        }
+        
         const result = await request<{ data: { content: string } }>(`/news/${id}/preview`);
         this.preview = result.data.content;
-        this.setMessage(`Preview chargee pour la news ${id}`);
+        this.previewItem = item;
+        this.setMessage(`Preview loaded for news ${id}`);
       } catch (error: any) {
-        this.setError(error?.data?.message || "Echec chargement preview");
+        this.setError(error?.data?.message || "Failed to load preview");
       } finally {
         this.actionLoading = false;
       }

@@ -10,6 +10,7 @@ use App\Services\WordPressService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use DOMDocument;
 
 class NewsController extends Controller
@@ -259,10 +260,17 @@ class NewsController extends Controller
                 Log::warning("Failed to generate French content, using fallback content");
             }
 
-            $contentFr = $this->finalizeArticleHtml($contentFr, $content, $originalTitle, $sourceHint, 'FR');
+            $contentFr = $this->finalizeArticleHtml($contentFr, $content, $titleFr, $sourceHint, 'FR');
 
-            $metaDescFr = $this->buildMetaDescriptionFromArticle($contentFr, 'FR');
-            $keyPhraseFr = $this->buildFocusKeyphraseFromTitle($originalTitle, 'FR');
+            $metaDescFr = $this->openaiService->generateFrenchMetaDescription($contentFr);
+            if (!$metaDescFr) {
+                $metaDescFr = $this->buildMetaDescriptionFromArticle($contentFr, 'FR');
+            }
+
+            $keyPhraseFr = $this->openaiService->generateFrenchKeyphrase($contentFr);
+            if (!$keyPhraseFr) {
+                $keyPhraseFr = $this->buildFocusKeyphraseFromTitle($titleFr, 'FR');
+            }
 
             // Get categories and tags
             $categoriesFr = $this->wordpressService->getCategoriesForClassification('FR');
@@ -270,11 +278,12 @@ class NewsController extends Controller
 
             $tagsFr = $this->wordpressService->getTagsForClassification('FR');
             $tagsString = $this->openaiService->classifyTags($contentFr, $tagsFr, 'FR');
+            $tagsString = $this->reorderSelectedTags($tagsString, $tagsFr, $categoriesFr, $categoriesString, $contentFr, $titleFr);
 
             // Save to database
             News::create([
                 'lang' => 'FR',
-                'title' => $this->shortenTitleForColumn($originalTitle),
+                'title' => $this->shortenTitleForColumn($titleFr),
                 'content' => $contentFr,
                 'metadescription' => $metaDescFr ?? '',
                 'focuskeyphrase' => $keyPhraseFr ?? '',
@@ -319,10 +328,17 @@ class NewsController extends Controller
                 Log::warning("Failed to generate English content, using fallback content");
             }
 
-            $contentEn = $this->finalizeArticleHtml($contentEn, $content, $originalTitle, $sourceHint, 'EN');
+            $contentEn = $this->finalizeArticleHtml($contentEn, $content, $titleEn, $sourceHint, 'EN');
 
-            $metaDescEn = $this->buildMetaDescriptionFromArticle($contentEn, 'EN');
-            $keyPhraseEn = $this->buildFocusKeyphraseFromTitle($originalTitle, 'EN');
+            $metaDescEn = $this->openaiService->generateEnglishMetaDescription($contentEn);
+            if (!$metaDescEn) {
+                $metaDescEn = $this->buildMetaDescriptionFromArticle($contentEn, 'EN');
+            }
+
+            $keyPhraseEn = $this->openaiService->generateEnglishKeyphrase($contentEn);
+            if (!$keyPhraseEn) {
+                $keyPhraseEn = $this->buildFocusKeyphraseFromTitle($titleEn, 'EN');
+            }
 
             // Get categories and tags
             $categoriesEn = $this->wordpressService->getCategoriesForClassification('EN');
@@ -330,11 +346,12 @@ class NewsController extends Controller
 
             $tagsEn = $this->wordpressService->getTagsForClassification('EN');
             $tagsString = $this->openaiService->classifyTags($contentEn, $tagsEn, 'EN');
+            $tagsString = $this->reorderSelectedTags($tagsString, $tagsEn, $categoriesEn, $categoriesString, $contentEn, $titleEn);
 
             // Save to database
             News::create([
                 'lang' => 'EN',
-                'title' => $this->shortenTitleForColumn($originalTitle),
+                'title' => $this->shortenTitleForColumn($titleEn),
                 'content' => $contentEn,
                 'metadescription' => $metaDescEn ?? '',
                 'focuskeyphrase' => $keyPhraseEn ?? '',
@@ -738,30 +755,27 @@ class NewsController extends Controller
         $base = preg_replace('/<a\b[^>]*href="[^"]*\.(png|jpe?g|gif|webp)[^"]*"[^>]*>.*?<\/a>/is', ' ', $base) ?? $base;
         $base = preg_replace('/https?:\/\/\S+\.(png|jpe?g|gif|webp)\S*/i', ' ', $base) ?? $base;
 
-        $plain = trim(strip_tags($base));
-        if ($plain === '') {
-            $plain = trim($rawContent);
-        }
-
-        $paragraphs = preg_split('/\n{2,}|\r\n\r\n/', str_replace(["\r\n", "\r"], "\n", $plain)) ?: [];
-        $htmlParagraphs = [];
-        foreach ($paragraphs as $paragraph) {
-            $paragraph = trim($paragraph);
-            if ($paragraph === '' || preg_match('/^\[\s*image\s+en\s+ligne\s*\]$/iu', $paragraph)) {
-                continue;
+        $structured = $this->normalizeStructuredArticleHtml($base, $originalTitle, $lang);
+        if ($structured === '') {
+            $plain = trim(strip_tags($base));
+            if ($plain === '') {
+                $plain = trim($rawContent);
             }
 
-            $htmlParagraphs[] = '<p>' . nl2br(htmlspecialchars($paragraph, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</p>';
+            $structured = $this->convertPlainTextToStructuredHtml($plain, $originalTitle);
         }
 
         $sourceLabel = $lang === 'FR' ? 'Source : ' : 'Source: ';
-        $hasSource = preg_match('/\bsource\s*:/i', implode("\n", $htmlParagraphs)) === 1;
+        $hasSource = preg_match('/\bsource\s*:/i', $structured) === 1;
         if (!$hasSource) {
-            $htmlParagraphs[] = '<p>' . htmlspecialchars($sourceLabel . $sourceHint, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>';
+            $structured .= '<p>' . htmlspecialchars($sourceLabel . $sourceHint, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>';
         }
 
-        $h2 = '<h2>' . htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</h2>';
-        return $h2 . implode('', $htmlParagraphs);
+        if (preg_match('/^\s*<h[1-3]\b/i', $structured) !== 1) {
+            $structured = '<h2>' . htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</h2>' . $structured;
+        }
+
+        return $structured;
     }
 
     private function buildMetaDescriptionFromArticle(string $contentHtml, string $lang): string
@@ -773,9 +787,9 @@ class NewsController extends Controller
             return '';
         }
 
-        // Target: 106–141 characters
+        // Target: 107–142 characters
         // If short text, return all (cannot expand without fabrication)
-        if (mb_strlen($text) <= 141) {
+        if (mb_strlen($text) >= 107 && mb_strlen($text) <= 142) {
             return $text;
         }
 
@@ -786,31 +800,40 @@ class NewsController extends Controller
             $candidate = trim($meta === '' ? $sentence : ($meta . ' ' . $sentence));
             $candidateLen = mb_strlen($candidate);
 
-            if ($candidateLen > 141) {
+            if ($candidateLen > 142) {
                 if ($meta === '') {
-                    // First sentence alone exceeds 141 — truncate it
-                    $meta = $this->smartWordLimit($sentence, 141);
+                    $meta = $this->smartWordLimit($sentence, 142);
                 }
                 break;
             }
 
             $meta = $candidate;
 
-            if ($candidateLen >= 106) {
-                // In [106, 141] range — stop adding more
+            if ($candidateLen >= 107) {
                 break;
             }
         }
 
-        // If still under 106, take a continuous word-bounded slice up to 141
-        if (mb_strlen($meta) < 106 && mb_strlen($text) >= 106) {
-            $meta = $this->smartWordLimit($text, 141);
+        if (mb_strlen($meta) < 107 && mb_strlen($text) >= 107) {
+            $meta = $this->smartWordLimit($text, 142);
+        }
+
+        if (mb_strlen($meta) < 107) {
+            $suffix = $lang === 'FR'
+                ? ' Les enjeux du secteur restent a suivre.'
+                : ' The wider aviation impact remains worth watching.';
+            if (!str_ends_with($meta, '.')) {
+                $meta .= '.';
+            }
+            if (mb_strlen($meta . $suffix) <= 142) {
+                $meta .= $suffix;
+            }
         }
 
         return trim($meta);
     }
 
-    private function shortenTitleForColumn(string $originalTitle, int $max = 53): string
+    private function shortenTitleForColumn(string $originalTitle, int $max = 62): string
     {
         $title = trim(strip_tags($originalTitle));
         if (mb_strlen($title) <= $max) {
@@ -836,14 +859,201 @@ class NewsController extends Controller
     {
         $clean = trim(strip_tags($title));
         $clean = str_replace(',', ' ', $clean);
+        $clean = preg_replace('/[;:.!?\/\\|]+/', ' ', $clean) ?? $clean;
         $clean = preg_replace('/\s+/', ' ', $clean) ?? $clean;
         $clean = preg_replace('/[;:!?]+$/', '', $clean) ?? $clean;
+        $clean = preg_replace('/\b(and|or|the|a|an|in|on|at|to|for|from|of|by)\b/i', ' ', $clean) ?? $clean;
+        $clean = preg_replace('/\s+/', ' ', trim($clean)) ?? trim($clean);
 
         if ($clean === '') {
             return $this->fallbackKeyphrase($title);
         }
 
-        return $this->smartWordLimit($clean, 90, 12);
+        return $this->smartWordLimit($clean, 80, 5);
+    }
+
+    private function normalizeStructuredArticleHtml(string $html, string $title, string $lang): string
+    {
+        $html = trim($html);
+        if ($html === '' || strpos($html, '<') === false) {
+            return '';
+        }
+
+        $html = preg_replace('/<(html|head|body|style|script|table|tbody|thead|tfoot|tr|td|th)[^>]*>/i', '', $html) ?? $html;
+        $html = preg_replace('/<\/(html|head|body|style|script|table|tbody|thead|tfoot|tr|td|th)>/i', '', $html) ?? $html;
+        $html = preg_replace('/\sstyle="[^"]*"/i', '', $html) ?? $html;
+        $html = preg_replace('/\sclass="[^"]*"/i', '', $html) ?? $html;
+        $html = preg_replace('/\sid="[^"]*"/i', '', $html) ?? $html;
+        $html = strip_tags($html, '<h1><h2><h3><h4><p><ul><ol><li><a><strong><em><blockquote><br>');
+        $html = preg_replace('/<p>\s*[-•*]\s*(.*?)<\/p>/iu', '<ul><li>$1</li></ul>', $html) ?? $html;
+        $html = preg_replace('/(?:<ul>\s*){2,}/i', '<ul>', $html) ?? $html;
+        $html = preg_replace('/(?:<\/ul>\s*){2,}/i', '</ul>', $html) ?? $html;
+        $html = trim($html);
+
+        return $html;
+    }
+
+    private function convertPlainTextToStructuredHtml(string $plainText, string $title): string
+    {
+        $lines = preg_split('/\n+/', str_replace(["\r\n", "\r"], "\n", $plainText)) ?: [];
+        $html = '';
+        $listType = null;
+        $headingAdded = false;
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                if ($listType !== null) {
+                    $html .= "</{$listType}>";
+                    $listType = null;
+                }
+                continue;
+            }
+
+            if (preg_match('/^[•*\-]\s+(.+)$/u', $line, $matches)) {
+                if ($listType !== 'ul') {
+                    if ($listType !== null) {
+                        $html .= "</{$listType}>";
+                    }
+                    $html .= '<ul>';
+                    $listType = 'ul';
+                }
+                $html .= '<li>' . htmlspecialchars($matches[1], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</li>';
+                continue;
+            }
+
+            if (preg_match('/^\d+[.)]\s+(.+)$/u', $line, $matches)) {
+                if ($listType !== 'ol') {
+                    if ($listType !== null) {
+                        $html .= "</{$listType}>";
+                    }
+                    $html .= '<ol>';
+                    $listType = 'ol';
+                }
+                $html .= '<li>' . htmlspecialchars($matches[1], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</li>';
+                continue;
+            }
+
+            if ($listType !== null) {
+                $html .= "</{$listType}>";
+                $listType = null;
+            }
+
+            if (!$headingAdded) {
+                $html .= '<h2>' . htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</h2>';
+                $headingAdded = true;
+            }
+
+            if ($this->looksLikeSectionHeading($line)) {
+                $html .= '<h3>' . htmlspecialchars(rtrim($line, ':'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</h3>';
+                continue;
+            }
+
+            $html .= '<p>' . htmlspecialchars($line, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>';
+        }
+
+        if ($listType !== null) {
+            $html .= "</{$listType}>";
+        }
+
+        return $html;
+    }
+
+    private function looksLikeSectionHeading(string $line): bool
+    {
+        return mb_strlen($line) <= 90
+            && preg_match('/^[A-Z0-9][^.!?]{3,90}$/u', $line) === 1
+            && str_word_count($line) <= 10;
+    }
+
+    private function reorderSelectedTags(?string $tagIds, array $allTags, array $allCategories, ?string $categoryIds, string $contentHtml, string $title): string
+    {
+        $selectedIds = array_values(array_filter(explode(',', (string) $tagIds), static fn ($id) => $id !== ''));
+        if (empty($selectedIds)) {
+            return '';
+        }
+
+        $tagMap = [];
+        foreach ($allTags as $tag) {
+            $tagMap[(string) $tag['wp_id']] = $tag;
+        }
+
+        $selectedCategoryIds = array_values(array_filter(explode(',', (string) $categoryIds), static fn ($id) => $id !== ''));
+        $selectedCategoryNames = [];
+        foreach ($allCategories as $category) {
+            if (in_array((string) $category['wp_id'], $selectedCategoryIds, true)) {
+                $selectedCategoryNames[] = $this->normalizeSearchText((string) $category['categ_name']);
+            }
+        }
+
+        $articleText = $this->normalizeSearchText($title . ' ' . strip_tags($contentHtml));
+        $ordered = [];
+
+        foreach ($selectedIds as $index => $tagId) {
+            if (!isset($tagMap[$tagId])) {
+                continue;
+            }
+
+            $tagName = (string) $tagMap[$tagId]['tag_name'];
+            $normalizedTag = $this->normalizeSearchText($tagName);
+
+            $priority = 3;
+            foreach ($selectedCategoryNames as $categoryName) {
+                if ($categoryName !== '' && ($normalizedTag === $categoryName || str_contains($normalizedTag, $categoryName) || str_contains($categoryName, $normalizedTag))) {
+                    $priority = 0;
+                    break;
+                }
+            }
+
+            if ($priority > 0 && $this->looksLikeLocationTag($normalizedTag, $articleText)) {
+                $priority = 1;
+            }
+
+            if ($priority > 1 && $this->looksLikeOrganizationTag($normalizedTag, $articleText)) {
+                $priority = 2;
+            }
+
+            $ordered[] = [
+                'id' => $tagId,
+                'priority' => $priority,
+                'position' => $index,
+            ];
+        }
+
+        usort($ordered, static function (array $left, array $right): int {
+            return [$left['priority'], $left['position']] <=> [$right['priority'], $right['position']];
+        });
+
+        return implode(',', array_map(static fn (array $item) => $item['id'], $ordered));
+    }
+
+    private function normalizeSearchText(string $text): string
+    {
+        $text = Str::lower(trim(strip_tags($text)));
+        $text = preg_replace('/[^\pL\pN]+/u', ' ', $text) ?? $text;
+        return trim($text);
+    }
+
+    private function looksLikeLocationTag(string $tagName, string $articleText): bool
+    {
+        if ($tagName === '' || !str_contains(' ' . $articleText . ' ', ' ' . $tagName . ' ')) {
+            return false;
+        }
+
+        if (preg_match('/\b(airport|aeroport|aéroport|city|ville|country|pays|region|région|hub)\b/u', $tagName) === 1) {
+            return true;
+        }
+
+        return preg_match('/\b(in|at|from|to|near|via|en|a|au|aux|dans|depuis|vers)\s+' . preg_quote($tagName, '/') . '\b/u', $articleText) === 1;
+    }
+
+    private function looksLikeOrganizationTag(string $tagName, string $articleText): bool
+    {
+        if ($tagName === '' || !str_contains(' ' . $articleText . ' ', ' ' . $tagName . ' ')) {
+            return false;
+        }
+
+        return preg_match('/\b(airlines?|airways?|airbus|boeing|embraer|atr|faa|easa|iata|nasa|group|groupe|company|compagnie|agency|agence|corporation|corp|inc|ltd|sa|sas|plc)\b/u', $tagName) === 1;
     }
 
     private function smartWordLimit(string $text, int $maxChars, int $maxWords = 999): string

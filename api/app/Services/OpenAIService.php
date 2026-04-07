@@ -38,8 +38,8 @@ class OpenAIService
      */
     public function generateFrenchContent(string $emailContent, string $titleFr): ?string
     {
-                $prompt = $this->buildContentPrompt($emailContent, $titleFr, 'FR');
-                return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleFr, 'FR');
+        $prompt = $this->buildContentPrompt($emailContent, $titleFr, 'FR');
+        return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleFr, 'FR');
     }
 
     /**
@@ -47,8 +47,8 @@ class OpenAIService
      */
     public function generateEnglishContent(string $emailContent, string $titleEn): ?string
     {
-                $prompt = $this->buildContentPrompt($emailContent, $titleEn, 'EN');
-                return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleEn, 'EN');
+        $prompt = $this->buildContentPrompt($emailContent, $titleEn, 'EN');
+        return $this->sanitizeHtmlArticle($this->callOpenAI($prompt, 1400), $emailContent, $titleEn, 'EN');
     }
 
     /**
@@ -56,8 +56,8 @@ class OpenAIService
      */
     public function generateFrenchMetaDescription(string $contentFr): ?string
     {
-                $prompt = $this->buildMetaDescriptionPrompt($contentFr, 'FR');
-                return $this->sanitizeMetaDescription($this->callOpenAI($prompt, 120), $contentFr, 'FR');
+        $prompt = $this->buildMetaDescriptionPrompt($contentFr, 'FR');
+        return $this->sanitizeMetaDescription($this->callOpenAI($prompt, 120), $contentFr, 'FR');
     }
 
     /**
@@ -65,8 +65,8 @@ class OpenAIService
      */
     public function generateEnglishMetaDescription(string $contentEn): ?string
     {
-                $prompt = $this->buildMetaDescriptionPrompt($contentEn, 'EN');
-                return $this->sanitizeMetaDescription($this->callOpenAI($prompt, 120), $contentEn, 'EN');
+        $prompt = $this->buildMetaDescriptionPrompt($contentEn, 'EN');
+        return $this->sanitizeMetaDescription($this->callOpenAI($prompt, 120), $contentEn, 'EN');
     }
 
     /**
@@ -74,8 +74,8 @@ class OpenAIService
      */
     public function generateFrenchKeyphrase(string $contentFr): ?string
     {
-                $prompt = $this->buildKeyphrasePrompt($contentFr, 'FR');
-                return $this->sanitizeKeyphrase($this->callOpenAI($prompt, 40), $contentFr, 'FR');
+        $prompt = $this->buildKeyphrasePrompt($contentFr, 'FR');
+        return $this->sanitizeKeyphrase($this->callOpenAI($prompt, 40), $contentFr, 'FR');
     }
 
     /**
@@ -83,8 +83,8 @@ class OpenAIService
      */
     public function generateEnglishKeyphrase(string $contentEn): ?string
     {
-                $prompt = $this->buildKeyphrasePrompt($contentEn, 'EN');
-                return $this->sanitizeKeyphrase($this->callOpenAI($prompt, 40), $contentEn, 'EN');
+        $prompt = $this->buildKeyphrasePrompt($contentEn, 'EN');
+        return $this->sanitizeKeyphrase($this->callOpenAI($prompt, 40), $contentEn, 'EN');
     }
 
     /**
@@ -164,10 +164,26 @@ $newsContent
 LISTE DES TAGS:
 $tagsList
 
+FILTRES D'EXCLUSION (OBLIGATOIRE) :
+Rejeter strictement:
+- Tous les tags contenant une DATE (2025, 2026, january, mars, Q1, etc)
+- Tous les tags non-pertinents pour AVIATION / AEROSPACE (ex: finance générale, politique générale, sport non-aérien)
+
+PRIORITÉ ABSOLUE :
+Sélectionner UNIQUEMENT les tags pertinents pour: compagnies aériennes, avions, aéroports, fabricants, technologies aérospatiales, organismes aéronautiques.
+
 MÉTHODE D'ANALYSE OBLIGATOIRE :
 1. Identifier les entités clés (compagnies aériennes, avions, fabricants, aéroports).
 2. Identifier les sujets spécifiques et les domaines concernés.
-3. Sélectionner UNIQUEMENT les tags directement pertinents.
+3. Sélectionner UNIQUEMENT les tags directement pertinents ET pertinents pour aviation.
+4. Éliminer tout tag de date, politique générale, ou sans lien aéronautique.
+5. Ordonner les tags restants par priorité éditoriale.
+
+ORDRE DE PRIORITÉ DES TAGS :
+- en premier : les tags qui recoupent les catégories retenues
+- ensuite : pays, ville, lieu, aéroport ou zone géographique
+- ensuite : société, compagnie, constructeur, organisme ou institution
+- enfin : les autres tags réellement utiles pour aviation
 
 FORMAT DE SORTIE :
 Retourne les wp_id que tu trouve et séparés par des virgules.
@@ -185,11 +201,14 @@ EXEMPLE VALIDE :
         $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
 
         return "You are an aviation editor.\n"
-            . "Write ONE SEO title in {$language} from the article text below.\n"
+            . "Write ONE compelling SEO news title in {$language} from the article text below.\n"
             . "Rules:\n"
             . "- Use only the {$language} article section.\n"
             . "- Ignore email chrome, confidentiality notices, styles, signatures, reply chains and bilingual sections in the other language.\n"
-            . "- Maximum 53 characters.\n"
+            . "- The title must be clear, specific, attractive and newsworthy.\n"
+            . "- Strict maximum: 62 characters.\n"
+            . "- If forced to truncate, rewrite naturally to avoid incomplete phrases like 'ends with and or: or - or comma'.\n"
+            . "- Never end with conjunctions (and, or), propositions (to, for), incomplete lists, or unfinished thoughts.\n"
             . "- If longer, rewrite naturally; do not cut mid-word.\n"
             . "- No HTML. No quotes. No prefix like RE/FW/TR.\n"
             . "- Return only the title.\n\n"
@@ -205,8 +224,15 @@ EXEMPLE VALIDE :
             . "Rules:\n"
             . "- Keep only the {$language} version.\n"
             . "- Exclude confidentiality notices, style blocks, signatures, contacts, reply chains, headers, footers and unrelated boilerplate.\n"
-            . "- Return clean semantic HTML only using <h2>, <p>, <ul>, <li>, <a>, <img> when justified.\n"
-            . "- Start with <h2>{$title}</h2>.\n"
+            . "- Return clean semantic HTML only.\n"
+            . "- Preserve and rebuild the editorial structure with meaningful headings and lists.\n"
+            . "- Convert bullet points into proper <ul><li>...</li></ul>.\n"
+            . "- Convert numbered lists into proper <ol><li>...</li></ol>.\n"
+            . "- Use <h2> for main sections and <h3> for subsections when the source structure justifies it.\n"
+            . "- Use <p>, <ul>, <ol>, <li>, <a>, <strong>, <em>, <blockquote>, <h2>, <h3> only when relevant.\n"
+            . "- Start with the PROVIDED TITLE as-is (preserve complete original title): <h2>{$title}</h2>\n"
+            . "- Then immediately follow with the article content (NO INTERMEDIATE TEXT).\n"
+            . "- Do not truncate or modify the title in the <h2> tag.\n"
             . "- Do not include CSS, <style>, <head>, <body>, <html>, tables, inline office markup or both languages.\n"
             . "- Keep factual content only.\n"
             . "- Return HTML only.\n\n"
@@ -219,9 +245,11 @@ EXEMPLE VALIDE :
 
         return "Write one plain-text SEO meta description in {$language}.\n"
             . "Rules:\n"
-            . "- 110 to 140 characters.\n"
+            . "- Strictly between 107 and 142 characters, spaces included.\n"
             . "- Plain text only, no HTML, no CSS, no quotes.\n"
             . "- Mention the core aviation topic and one key fact.\n"
+            . "- Make it attractive for SEO / SEA / GEO and natural for readers.\n"
+            . "- Reformulate if needed to stay inside the character range.\n"
             . "- Return only the meta description.\n\n"
             . strip_tags($content);
     }
@@ -235,7 +263,9 @@ EXEMPLE VALIDE :
             . "- 2 to 5 words.\n"
             . "- Must identify the central aviation subject.\n"
             . "- Prefer company, aircraft, airport, program or route names when present.\n"
+            . "- No comma anywhere.\n"
             . "- No sentence, no punctuation at the end, no HTML.\n"
+            . "- Reformulate if needed to remove separators and keep the phrase SEO-friendly.\n"
             . "- Return only the keyphrase.\n\n"
             . strip_tags($content);
     }
@@ -244,11 +274,14 @@ EXEMPLE VALIDE :
     {
         $fallbackTitle = $this->extractFallbackTitleFromContent($fallbackContent, $lang);
 
-        $text = $fallbackTitle !== '' ? $fallbackTitle : $this->sanitizePlainText($title ?? '');
+        $text = $this->sanitizePlainText($title ?? '');
+        if ($text === '') {
+            $text = $fallbackTitle;
+        }
 
         $text = preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $text) ?? $text;
         $text = preg_replace('/\s*[-|:]\s*(version|v)\s*\d+$/i', '', $text) ?? $text;
-        return $this->smartLimit($text, 53);
+        return $this->smartLimit($text, 62);
     }
 
     private function sanitizeHtmlArticle(?string $html, string $fallbackContent, string $title, string $lang): ?string
@@ -265,6 +298,7 @@ EXEMPLE VALIDE :
             $candidate = preg_replace('/\sstyle="[^"]*"/i', '', $candidate) ?? $candidate;
             $candidate = preg_replace('/\sclass="[^"]*"/i', '', $candidate) ?? $candidate;
             $candidate = preg_replace('/\sid="[^"]*"/i', '', $candidate) ?? $candidate;
+            $candidate = strip_tags($candidate, '<h1><h2><h3><h4><p><ul><ol><li><a><img><strong><em><blockquote><br>');
             $candidate = html_entity_decode($candidate, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         }
 
@@ -278,26 +312,100 @@ EXEMPLE VALIDE :
 
     private function sanitizeMetaDescription(?string $value, string $content, string $lang): ?string
     {
+        $candidate = $this->sanitizePlainText($value ?? '');
+        if ($candidate !== '') {
+            $candidate = $this->fitMetaDescriptionLength($candidate, $lang);
+            if ($this->isMetaDescriptionLengthValid($candidate)) {
+                return $candidate;
+            }
+        }
+
         $text = $this->extractMetaSourceText($content);
-
-        if (mb_strlen($text) > 140) {
-            $text = $this->smartLimit($text, 140);
+        if ($text === '') {
+            $text = $this->sanitizePlainText(strip_tags($content));
         }
 
-        if (mb_strlen($text) < 110) {
-            $base = $this->sanitizePlainText(strip_tags($content));
-            $text = $this->smartLimit($base, 140);
-        }
-
-        return trim($text);
+        return $this->fitMetaDescriptionLength($text, $lang);
     }
 
     private function sanitizeKeyphrase(?string $value, string $content, string $lang): ?string
     {
-        $title = $this->extractFallbackTitleFromContent($content, $lang);
-        $text = $this->extractKeyphraseFromContent($title !== '' ? $title : $content, $lang);
+        $text = $this->sanitizePlainText($value ?? '');
+        if ($text === '') {
+            $title = $this->extractFallbackTitleFromContent($content, $lang);
+            $text = $this->extractKeyphraseFromContent($title !== '' ? $title : $content, $lang);
+        }
 
-        return $this->smartLimit($text, 60);
+        return $this->fitKeyphrase($text, $content, $lang);
+    }
+
+    private function isMetaDescriptionLengthValid(string $text): bool
+    {
+        $length = mb_strlen(trim($text));
+        return $length >= 107 && $length <= 142;
+    }
+
+    private function fitMetaDescriptionLength(string $text, string $lang): string
+    {
+        $text = $this->sanitizePlainText($text);
+        $text = preg_replace('/\bsource\s*:\s*.+$/i', '', $text) ?? $text;
+        $text = trim($text, " ,;:-");
+
+        if (mb_strlen($text) > 142) {
+            $text = $this->smartLimit($text, 142);
+        }
+
+        if (mb_strlen($text) < 107) {
+            $suffix = $lang === 'FR'
+                ? ' Les enjeux du secteur sont a suivre.'
+                : ' The broader aviation impact is worth watching.';
+
+            if (!str_ends_with($text, '.')) {
+                $text .= '.';
+            }
+
+            if (mb_strlen($text . $suffix) <= 142) {
+                $text .= $suffix;
+            }
+        }
+
+        if (mb_strlen($text) < 107) {
+            $baseWords = preg_split('/\s+/', $this->sanitizePlainText($text)) ?: [];
+            while (mb_strlen($text) < 107 && !empty($baseWords)) {
+                $text .= ' ' . end($baseWords);
+            }
+        }
+
+        if (mb_strlen($text) > 142) {
+            $text = $this->smartLimit($text, 142);
+        }
+
+        return trim($text, " ,;:-");
+    }
+
+    private function fitKeyphrase(string $text, string $content, string $lang): string
+    {
+        $text = str_replace(',', ' ', $text);
+        $text = preg_replace('/[;:.!?\/\\|]+/', ' ', $text) ?? $text;
+        $text = preg_replace('/\s+/', ' ', trim($text)) ?? trim($text);
+
+        $words = array_values(array_filter(
+            preg_split('/\s+/', $text) ?: [],
+            static fn ($word) => $word !== ''
+        ));
+
+        if (count($words) < 2) {
+            $fallback = preg_split('/\s+/', $this->extractKeyphraseFromContent($content, $lang)) ?: [];
+            $words = array_values(array_filter(array_merge($words, $fallback), static fn ($word) => $word !== ''));
+        }
+
+        $words = array_slice($words, 0, 5);
+
+        if (count($words) < 2) {
+            $words = $lang === 'FR' ? ['actualite', 'aviation'] : ['aviation', 'news'];
+        }
+
+        return implode(' ', $words);
     }
 
     private function sanitizeIdList(?string $value, array $items, string $content, bool $includeNewsDefault, string $nameField): string

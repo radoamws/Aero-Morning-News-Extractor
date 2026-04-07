@@ -17,7 +17,10 @@ const {
   selectedCount,
   allSelected,
   stats,
-  preview
+  preview,
+  previewItem,
+  isProcessing,
+  processProgress
 } = storeToRefs(newsStore);
 
 const wpUser = ref("");
@@ -355,12 +358,126 @@ onMounted(async () => {
       </div>
     </article>
 
-    <article class="panel" v-if="preview">
-      <h2>Preview HTML</h2>
-      <div class="preview" v-html="preview" />
+    <article class="panel" v-if="preview && previewItem">
+      <h2>SEO Preview & Character Counts</h2>
+      
+      <!-- SEO Warnings -->
+      <div v-if="newsStore.previewSeoWarnings.length > 0" class="panel panel-warning">
+        <strong>⚠️ SEO Warnings:</strong>
+        <ul style="margin: 0.5rem 0 0 1.5rem;">
+          <li v-for="(warning, i) in newsStore.previewSeoWarnings" :key="i" style="margin: 0.25rem 0; color: #d97706;">
+            {{ warning }}
+          </li>
+        </ul>
+      </div>
+      
+      <!-- Title -->
+      <div style="margin-top: 1rem;">
+        <h3 style="font-size: 0.9rem; margin: 0.5rem 0; color: #666; text-transform: uppercase; letter-spacing: 0.05em;">Title (max 62 chars)</h3>
+        <div style="background: #f5f5f5; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">
+          <p style="margin: 0; word-break: break-word;">{{ previewItem.title }}</p>
+        </div>
+        <p style="margin: 0; font-size: 0.85rem; color: #999;">
+          {{ previewItem.title.length }}/62 characters
+          <span v-if="previewItem.title.length > 62" style="color: #dc2626; margin-left: 0.5rem;">❌ Too long</span>
+          <span v-else-if="previewItem.title.length > 55" style="color: #ea580c; margin-left: 0.5rem;">⚠️ Getting long</span>
+          <span v-else style="color: #16a34a; margin-left: 0.5rem;">✓ OK</span>
+        </p>
+      </div>
+      
+      <!-- Meta Description -->
+      <div style="margin-top: 1rem;">
+        <h3 style="font-size: 0.9rem; margin: 0.5rem 0; color: #666; text-transform: uppercase; letter-spacing: 0.05em;">Meta Description (107–142 chars)</h3>
+        <div style="background: #f5f5f5; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">
+          <p style="margin: 0; word-break: break-word;">{{ previewItem.metadescription }}</p>
+        </div>
+        <p style="margin: 0; font-size: 0.85rem; color: #999;">
+          {{ previewItem.metadescription.length }}/107-142 characters
+          <span v-if="previewItem.metadescription.length < 107 || previewItem.metadescription.length > 142" style="color: #dc2626; margin-left: 0.5rem;">❌ Out of range</span>
+          <span v-else style="color: #16a34a; margin-left: 0.5rem;">✓ OK</span>
+        </p>
+      </div>
+      
+      <!-- Focus Keyphrase -->
+      <div style="margin-top: 1rem;">
+        <h3 style="font-size: 0.9rem; margin: 0.5rem 0; color: #666; text-transform: uppercase; letter-spacing: 0.05em;">Focus Keyphrase (2–5 words)</h3>
+        <div style="background: #f5f5f5; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">
+          <p style="margin: 0; word-break: break-word;">{{ previewItem.focuskeyphrase }}</p>
+        </div>
+        <p style="margin: 0; font-size: 0.85rem; color: #999;">
+          {{ previewItem.focuskeyphrase.trim().split(/\s+/).filter((w: string) => w.length > 0).length }} words
+          <span v-if="previewItem.focuskeyphrase.length === 0" style="color: #dc2626; margin-left: 0.5rem;">❌ Empty</span>
+          <span v-else-if="previewItem.focuskeyphrase.trim().split(/\s+/).filter((w: string) => w.length > 0).length < 2 || previewItem.focuskeyphrase.trim().split(/\s+/).filter((w: string) => w.length > 0).length > 5" style="color: #dc2626; margin-left: 0.5rem;">❌ Invalid</span>
+          <span v-else style="color: #16a34a; margin-left: 0.5rem;">✓ OK</span>
+        </p>
+      </div>
+
+      <!-- HTML Preview -->
+      <div style="margin-top: 1.5rem;">
+        <h3 style="font-size: 0.9rem; margin: 0.5rem 0; color: #666; text-transform: uppercase; letter-spacing: 0.05em;">HTML Content Preview</h3>
+        <div class="preview" v-html="preview" />
+      </div>
     </article>
 
     <article v-if="message" class="panel panel-success">{{ message }}</article>
     <article v-if="error" class="panel panel-error">{{ error }}</article>
+
+    <!-- Processing Modal Overlay -->
+    <div v-if="isProcessing" style="
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    ">
+      <div style="
+        background: white;
+        padding: 2rem;
+        border-radius: 8px;
+        max-width: 400px;
+        width: 90%;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      ">
+        <h2 style="margin-top: 0;">Processing News</h2>
+        <p style="color: #666; margin: 0.5rem 0;">{{ processProgress.message }}</p>
+        <p style="color: #999; font-size: 0.9rem; margin: 0.5rem 0;">
+          Stage: <strong>{{ processProgress.stage }}</strong>
+        </p>
+
+        <!-- Progress Bar -->
+        <div style="
+          width: 100%;
+          height: 24px;
+          background: #e5e7eb;
+          border-radius: 4px;
+          overflow: hidden;
+          margin: 1rem 0;
+        ">
+          <div :style="{
+            height: '100%',
+            background: 'linear-gradient(90deg, #3b82f6, #1d4ed8)',
+            width: processProgress.current + '%',
+            transition: 'width 0.3s ease',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white',
+            fontSize: '0.8rem',
+            fontWeight: '600'
+          }">
+            {{ Math.round(processProgress.current) }}%
+          </div>
+        </div>
+
+        <p style="text-align: center; color: #999; font-size: 0.85rem; margin: 0;">
+          Please wait...
+        </p>
+      </div>
+    </div>
   </section>
 </template>
