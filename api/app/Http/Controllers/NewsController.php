@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\IgnoredEmail;
 use App\Models\News;
 use App\Services\EmailService;
 use App\Services\ImageService;
@@ -10,6 +11,7 @@ use App\Services\WordPressService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use DOMDocument;
 
@@ -104,10 +106,15 @@ class NewsController extends Controller
             $processedCount = 0;
             $failedCount = 0;
             $skippedCount = 0;
+            $summary = [
+                'processed' => [],
+                'failed' => [],
+                'skipped' => [],
+            ];
 
             foreach ($emails as $mail) {
                 try {
-                    $result = $this->processSingleEmail($mail);
+                    $result = $this->processSingleEmail($mail, $summary);
 
                     if ($result === self::EMAIL_RESULT_PROCESSED) {
                         $processedCount++;
@@ -121,6 +128,8 @@ class NewsController extends Controller
                     $failedCount++;
                 }
             }
+
+            $this->sendProcessingSummaryEmail($summary);
 
             return response()->json([
                 'success' => true,
@@ -141,8 +150,14 @@ class NewsController extends Controller
     /**
      * Process a single email
      */
-    private function processSingleEmail($mail): string
+    private function processSingleEmail($mail, array &$summary): string
     {
+        $emailContent = [
+            'subject' => 'no-subject',
+            'from' => '',
+            'message_id' => '',
+        ];
+
         try {
             // Extract email content
             $emailContent = $this->emailService->extractEmailContent($mail);
@@ -163,13 +178,20 @@ class NewsController extends Controller
             $languageDetectionText = $this->normalizePlainTextContent(strip_tags($normalizedBodyContent));
 
             if (!$this->openaiService->isAviationRelevant($languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent)) {
+                $this->storeIgnoredEmail($emailContent, $languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent, 'not_relevant');
+                $summary['skipped'][] = [
+                    'subject' => $emailContent['subject'] ?? 'no-subject',
+                    'from' => $emailContent['from'] ?? '',
+                    'reason' => 'not_relevant',
+                ];
                 Log::info('Skipping non-aviation email: ' . ($emailContent['subject'] ?? 'no-subject'));
                 $this->emailService->markAsRead($mail->id);
                 return self::EMAIL_RESULT_SKIPPED;
             }
 
+            $hasAttachments = $this->emailService->hasAttachments($mail);
             $imageUrl = null;
-            if ($this->emailService->hasAttachments($mail)) {
+            if ($hasAttachments) {
                 $bestAttachment = $this->selectBestImageAttachment($mail->getAttachments());
                 if ($bestAttachment) {
                     $filePath = $bestAttachment->filePath ?? null;
@@ -180,8 +202,37 @@ class NewsController extends Controller
                         );
                     }
                 }
-            } else {
-                $foundImageUrl = $this->emailService->extractImageUrlFromHtml($normalizedBodyContent);
+            }
+
+            Log::info("Email subject: " . $emailContent['subject']);
+            Log::info("Has attachment: " . ($hasAttachments ? 'yes' : 'no'));
+
+            $sections = $this->openaiService->extractNewsSections($normalizedBodyContent);
+            $frenchContent = trim((string) ($sections['FR'] ?? ''));
+            $englishContent = trim((string) ($sections['EN'] ?? ''));
+
+            if ($frenchContent === '' && $englishContent === '') {
+                $fallbackLanguages = $this->detectLanguage($languageDetectionText);
+                if (in_array('FR', $fallbackLanguages, true)) {
+                    $frenchContent = $this->extractContentForLanguage($normalizedBodyContent, 'FR');
+                }
+                if (in_array('EN', $fallbackLanguages, true)) {
+                    $englishContent = $this->extractContentForLanguage($normalizedBodyContent, 'EN');
+                }
+            }
+
+            if (!$hasAttachments) {
+                $imageSelectionContent = trim($frenchContent . "\n\n" . $englishContent);
+                if ($imageSelectionContent === '') {
+                    $imageSelectionContent = $normalizedBodyContent;
+                }
+
+                $imageCandidates = $this->emailService->extractImageCandidatesFromHtml($imageSelectionContent);
+                $foundImageUrl = $this->openaiService->chooseRelevantImageUrl(
+                    $languageDetectionText !== '' ? $languageDetectionText : $imageSelectionContent,
+                    $imageCandidates
+                );
+
                 if ($foundImageUrl && $this->imageService->isValidImageUrl($foundImageUrl)) {
                     $imageUrl = $this->imageService->downloadAndOptimizeImage(
                         $foundImageUrl,
@@ -190,20 +241,16 @@ class NewsController extends Controller
                 }
             }
 
-            Log::info("Email subject: " . $emailContent['subject']);
-            Log::info("Has attachment: " . ($this->emailService->hasAttachments($mail) ? 'yes' : 'no'));
-
-            // Detect language from content
-            $language = $this->detectLanguage($languageDetectionText);
             $createdAny = false;
 
-            // Generate French news if content contains French
-            if (in_array('FR', $language)) {
+            if ($frenchContent !== '') {
                 if (in_array('FR', $existingLangs, true)) {
                     Log::info("French news already exists for email: " . $emailContent['message_id']);
                 } else {
-                    $frenchContent = $this->extractContentForLanguage($normalizedBodyContent, 'FR');
-                    $frenchOriginalTitle = $this->extractOriginalArticleTitle($frenchContent, $emailContent['subject'], 'FR');
+                    $frenchOriginalTitle = $this->openaiService->extractOriginalArticleTitle($frenchContent, 'FR', (string) $emailContent['subject']);
+                    if ($frenchOriginalTitle === '') {
+                        $frenchOriginalTitle = $this->extractOriginalArticleTitle($frenchContent, $emailContent['subject'], 'FR');
+                    }
                     $frenchSource = $this->detectArticleSource($frenchContent, (string) ($emailContent['from'] ?? ''));
                     $createdAny = $this->processFrenchNews(
                         $frenchContent,
@@ -216,13 +263,14 @@ class NewsController extends Controller
                 }
             }
 
-            // Generate English news if content contains English
-            if (in_array('EN', $language)) {
+            if ($englishContent !== '') {
                 if (in_array('EN', $existingLangs, true)) {
                     Log::info("English news already exists for email: " . $emailContent['message_id']);
                 } else {
-                    $englishContent = $this->extractContentForLanguage($normalizedBodyContent, 'EN');
-                    $englishOriginalTitle = $this->extractOriginalArticleTitle($englishContent, $emailContent['subject'], 'EN');
+                    $englishOriginalTitle = $this->openaiService->extractOriginalArticleTitle($englishContent, 'EN', (string) $emailContent['subject']);
+                    if ($englishOriginalTitle === '') {
+                        $englishOriginalTitle = $this->extractOriginalArticleTitle($englishContent, $emailContent['subject'], 'EN');
+                    }
                     $englishSource = $this->detectArticleSource($englishContent, (string) ($emailContent['from'] ?? ''));
                     $createdAny = $this->processEnglishNews(
                         $englishContent,
@@ -236,21 +284,129 @@ class NewsController extends Controller
             }
 
             if (!$createdAny && !empty($existingLangs)) {
+                $summary['skipped'][] = [
+                    'subject' => $emailContent['subject'] ?? 'no-subject',
+                    'from' => $emailContent['from'] ?? '',
+                    'reason' => 'already_processed',
+                ];
                 return self::EMAIL_RESULT_SKIPPED;
             }
 
             if (!$createdAny) {
                 Log::warning('No news generated for email: ' . ($emailContent['message_id'] ?: 'no-message-id'));
+                $summary['failed'][] = [
+                    'subject' => $emailContent['subject'] ?? 'no-subject',
+                    'from' => $emailContent['from'] ?? '',
+                    'error' => 'No news generated from extracted sections',
+                ];
                 return self::EMAIL_RESULT_FAILED;
             }
 
             // Mark email as read
             $this->emailService->markAsRead($mail->id);
 
+            $summary['processed'][] = [
+                'subject' => $emailContent['subject'] ?? 'no-subject',
+                'from' => $emailContent['from'] ?? '',
+            ];
+
             return self::EMAIL_RESULT_PROCESSED;
         } catch (\Throwable $e) {
             Log::error("Error processing single email: " . $e->getMessage());
+            $summary['failed'][] = [
+                'subject' => $emailContent['subject'] ?? 'no-subject',
+                'from' => $emailContent['from'] ?? '',
+                'error' => $e->getMessage(),
+            ];
             return self::EMAIL_RESULT_FAILED;
+        }
+    }
+
+    private function storeIgnoredEmail(array $emailContent, string $excerpt, string $reason): void
+    {
+        try {
+            IgnoredEmail::create([
+                'message_id' => (string) ($emailContent['message_id'] ?? ''),
+                'subject' => (string) ($emailContent['subject'] ?? ''),
+                'sender' => (string) ($emailContent['from'] ?? ''),
+                'reason' => $reason,
+                'excerpt' => mb_substr(trim($excerpt), 0, 5000),
+                'processed_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Unable to persist ignored email: ' . $e->getMessage());
+        }
+    }
+
+    private function sendProcessingSummaryEmail(array $summary): void
+    {
+        $to = config('services.notify.email', env('NOTIFY_EMAIL', 'rado.rakotoarivelo@amws.space'));
+        $processedCount = count($summary['processed']);
+        $failedCount = count($summary['failed']);
+        $skippedCount = count($summary['skipped']);
+
+        $body  = "Résumé traitement emails news — " . now()->format('d/m/Y H:i') . "\n";
+        $body .= str_repeat('=', 60) . "\n\n";
+        $body .= "Traités : {$processedCount}\n";
+        $body .= "Ignorés : {$skippedCount}\n";
+        $body .= "Échecs  : {$failedCount}\n\n";
+
+        if (!empty($summary['processed'])) {
+            $body .= str_repeat('-', 60) . "\n";
+            $body .= "MAILS TRAITÉS\n";
+            $body .= str_repeat('-', 60) . "\n";
+            foreach ($summary['processed'] as $item) {
+                $body .= "- {$item['subject']}";
+                if (($item['from'] ?? '') !== '') {
+                    $body .= " | {$item['from']}";
+                }
+                $body .= "\n";
+            }
+            $body .= "\n";
+        }
+
+        if (!empty($summary['skipped'])) {
+            $body .= str_repeat('-', 60) . "\n";
+            $body .= "MAILS IGNORÉS (non pertinents / déjà traités)\n";
+            $body .= str_repeat('-', 60) . "\n";
+            foreach ($summary['skipped'] as $item) {
+                $body .= "- {$item['subject']}";
+                if (($item['from'] ?? '') !== '') {
+                    $body .= " | {$item['from']}";
+                }
+                if (($item['reason'] ?? '') !== '') {
+                    $body .= " | raison: {$item['reason']}";
+                }
+                $body .= "\n";
+            }
+            $body .= "\n";
+        }
+
+        if (!empty($summary['failed'])) {
+            $body .= str_repeat('-', 60) . "\n";
+            $body .= "MAILS EN ÉCHEC\n";
+            $body .= str_repeat('-', 60) . "\n";
+            foreach ($summary['failed'] as $item) {
+                $body .= "- {$item['subject']}";
+                if (($item['from'] ?? '') !== '') {
+                    $body .= " | {$item['from']}";
+                }
+                if (($item['error'] ?? '') !== '') {
+                    $body .= " | erreur: {$item['error']}";
+                }
+                $body .= "\n";
+            }
+            $body .= "\n";
+        }
+
+        try {
+            Mail::raw($body, function ($message) use ($to) {
+                $message->to($to)
+                    ->subject('Résumé traitement emails news — ' . now()->format('d/m/Y H:i'));
+            });
+            Log::info("Processing summary email sent to {$to}");
+        } catch (\Throwable $e) {
+            Log::error('Failed to send processing summary email: ' . $e->getMessage());
         }
     }
 
@@ -912,7 +1068,29 @@ class NewsController extends Controller
             }
         }
 
-        // 2. Scan content (first 1500 chars) for known organizations
+        // 2. If content contains an explicit organization acronym (e.g., "... (VNH)"), prefer it.
+        $firstChunk = (string) mb_substr($content, 0, 900);
+        $stopAcronyms = [
+            'CEO', 'CFO', 'CTO', 'COO', 'VP', 'SVP', 'EVP',
+            'FAA', 'EASA', 'IATA', 'ICAO', 'EU', 'UK', 'US', 'UAE', 'NATO',
+        ];
+
+        if (preg_match_all('/\b([A-Z][A-Za-z&\'\".-]{1,}(?:\s+[A-Z][A-Za-z&\'\".-]{1,}){1,8})\s*\(([A-Z]{2,6})\)(?=\W|$)/u', $firstChunk, $m, PREG_SET_ORDER) > 0) {
+            foreach ($m as $match) {
+                $org = trim((string) ($match[1] ?? ''));
+                $acro = trim((string) ($match[2] ?? ''));
+                if ($acro !== '' && !in_array($acro, $stopAcronyms, true)) {
+                    // Keep short acronyms as Source when they look like a real org handle.
+                    return $acro;
+                }
+
+                if ($org !== '' && mb_strlen($org) >= 3 && mb_strlen($org) <= 50) {
+                    return $org;
+                }
+            }
+        }
+
+        // 3. Scan content (first 1500 chars) for known organizations
         $haystack = mb_strtolower(mb_substr($content, 0, 1500) . ' ' . mb_strtolower($from));
 
         $sourceMap = [
@@ -951,7 +1129,7 @@ class NewsController extends Controller
             }
         }
 
-        // 3. Fall back to clean domain from the email address
+        // 4. Fall back to clean domain from the email address
         if ($from !== '' && preg_match('/@([\w.-]+)/', $from, $dm)) {
             $domain = strtolower($dm[1]);
             $domain = preg_replace('/\.(com|fr|net|org|de|uk|ca|us|au|io)$/', '', $domain) ?? $domain;
@@ -988,16 +1166,17 @@ class NewsController extends Controller
             $structured = $this->convertPlainTextToStructuredHtml($plain, $originalTitle);
         }
 
+        // Always enforce <h2>Original Title</h2> at the very top.
+        // This prevents model output from using a different heading/title.
+        $structured = preg_replace('/^\s*<h[1-6]\b[^>]*>.*?<\/h[1-6]>\s*/is', '', $structured) ?? $structured;
+        $structured = '<h2>' . htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</h2>' . $structured;
+
         $structured = $this->removeDuplicatedTitleInBody($structured, $originalTitle);
 
-        $sourceLabel = $lang === 'FR' ? 'Source : ' : 'Source: ';
+        $sourceLabel = 'Source: ';
         $hasSource = preg_match('/\bsource\s*:/i', $structured) === 1;
         if (!$hasSource) {
             $structured .= '<p>' . htmlspecialchars($sourceLabel . $sourceHint, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>';
-        }
-
-        if (preg_match('/^\s*<h[1-3]\b/i', $structured) !== 1) {
-            $structured = '<h2>' . htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</h2>' . $structured;
         }
 
         return $structured;
@@ -1036,10 +1215,35 @@ class NewsController extends Controller
                 continue;
             }
 
-            $nodeText = mb_strtolower(trim(preg_replace('/\s+/', ' ', $node->textContent) ?? ''));
+            $rawNodeText = trim((string) (preg_replace('/\s+/', ' ', $node->textContent) ?? ''));
+            $nodeText = mb_strtolower($rawNodeText);
             if (in_array(strtolower($node->tagName), ['p', 'h3', 'h4', 'strong'], true) && $nodeText === $normalizedTitle) {
                 $toRemove[] = $node;
                 continue;
+            }
+
+            if (in_array(strtolower($node->tagName), ['p', 'h3', 'h4'], true) && str_starts_with($nodeText, $normalizedTitle)) {
+                $remainder = $rawNodeText;
+                $titlePattern = preg_quote(trim(preg_replace('/\s+/', ' ', strip_tags($title)) ?? ''), '/');
+                $titlePattern = preg_replace('/\s+/', '\\s+', $titlePattern) ?? $titlePattern;
+
+                while (str_starts_with(mb_strtolower(trim((string) (preg_replace('/\s+/', ' ', $remainder) ?? ''))), $normalizedTitle)) {
+                    $remainder = trim((string) preg_replace(
+                        '/^' . $titlePattern . '\s*/iu',
+                        '',
+                        $remainder
+                    ));
+                }
+
+                if ($remainder === '') {
+                    $toRemove[] = $node;
+                } else {
+                    while ($node->firstChild) {
+                        $node->removeChild($node->firstChild);
+                    }
+                    $node->appendChild($dom->createTextNode($remainder));
+                }
+                break;
             }
 
             break;

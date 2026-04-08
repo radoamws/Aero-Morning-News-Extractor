@@ -280,6 +280,115 @@ EXEMPLE VALIDE :
         return $this->matchesAviationHeuristic($plainContent);
     }
 
+    public function extractNewsSections(string $content): array
+    {
+        $structuredContent = $this->prepareStructuredPromptText($content);
+        if ($structuredContent === '') {
+            return ['FR' => '', 'EN' => ''];
+        }
+
+        $prompt = "You are extracting aviation news sections from a forwarded email.\n"
+            . "Return a strict JSON object with exactly two keys: FR and EN.\n"
+            . "Each value must contain ONLY the relevant article section in that language.\n"
+            . "If a language is absent, return an empty string for that key.\n"
+                . "Ignore forwarded-email boilerplate, webmail headers/footers, signatures, confidentiality notices, menus, related articles, top/bottom of form markers, comment blocks, duplicated translated headers, and About / À propos corporate boilerplate blocks.\n"
+            . "Preserve the exact article lines in each language section.\n"
+            . "Do not summarize. Do not translate. Do not add any text outside JSON.\n\n"
+            . mb_substr($structuredContent, 0, 12000);
+
+        $response = trim((string) $this->callOpenAI($prompt, 900));
+        $decoded = json_decode($response, true);
+
+        if (!is_array($decoded)) {
+            return $this->splitSectionsHeuristically($structuredContent);
+        }
+
+        $sections = [
+            'FR' => $this->sanitizeExtractedSection((string) ($decoded['FR'] ?? '')),
+            'EN' => $this->sanitizeExtractedSection((string) ($decoded['EN'] ?? '')),
+        ];
+
+        if (($sections['FR'] === '') && ($sections['EN'] === '')) {
+            return $this->splitSectionsHeuristically($structuredContent);
+        }
+        
+            // If the email clearly contains explicit bilingual markers (Version UK / Version F/FR),
+            // prefer a deterministic split to avoid any title/image/header noise.
+            if ($this->looksLikeVersionBilingualEmail($structuredContent)) {
+                $sections = $this->splitSectionsHeuristically($structuredContent);
+                if (trim($sections['FR']) !== '' || trim($sections['EN']) !== '') {
+                    return $sections;
+                }
+            }
+
+        return $sections;
+    }
+
+    public function extractOriginalArticleTitle(string $sectionContent, string $lang, string $subject = ''): string
+    {
+        $plainSection = $this->prepareStructuredPromptText($sectionContent);
+        if ($plainSection === '') {
+            return $this->normalizeTitleCandidate($subject);
+        }
+
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+        $prompt = "You are identifying the original article headline from an aviation news section.\n"
+            . "Language: {$language}.\n"
+            . "Return the original article title exactly as supported by the first meaningful lines of the section.\n"
+            . "Usually it is the first full headline sentence.\n"
+            . "Reject labels such as Version UK, Version FR, News, Industry, Bottom of Form, Top of Form, Related Articles, About, Source.\n"
+            . "Return only the title, no quotes, no prefix, no explanation.\n\n"
+            . mb_substr($plainSection, 0, 4000);
+
+        $candidate = $this->normalizeTitleCandidate((string) $this->callOpenAI($prompt, 80));
+
+        if ($candidate !== '' && !$this->isForbiddenTitleCandidate($candidate) && $this->isTitleRelatedToContent($candidate, $plainSection)) {
+            if ($this->isDescriptiveTitle($candidate)) {
+                return $candidate;
+            }
+        }
+
+        $derivedTitle = $this->buildTitleFromLeadingLines($plainSection);
+        if ($derivedTitle !== '' && !$this->isForbiddenTitleCandidate($derivedTitle)) {
+            return $derivedTitle;
+        }
+
+        return $this->extractFallbackTitleFromContent($plainSection, $lang);
+    }
+
+    public function chooseRelevantImageUrl(string $content, array $imageCandidates): ?string
+    {
+        $imageCandidates = array_values(array_unique(array_filter(array_map('trim', $imageCandidates), static fn ($url) => $url !== '')));
+        if (empty($imageCandidates)) {
+            return null;
+        }
+
+        if (count($imageCandidates) === 1) {
+            return $imageCandidates[0];
+        }
+
+        $candidateList = implode("\n", array_map(static fn (string $url, int $index) => ($index + 1) . '. ' . $url, $imageCandidates, array_keys($imageCandidates)));
+        $prompt = "You are selecting the featured image for an aviation news article extracted from a forwarded email.\n"
+            . "Choose the single image URL that is most likely the main article image.\n"
+            . "Reject logos, banners, sponsor images, signatures, social icons, webmail assets, headers, footers, and decorative graphics.\n"
+            . "Return only one exact URL from the candidate list below. If none is suitable, return NONE.\n\n"
+            . "ARTICLE EXCERPT:\n" . mb_substr($this->prepareStructuredPromptText($content), 0, 2500) . "\n\n"
+            . "IMAGE CANDIDATES:\n{$candidateList}";
+
+        $response = trim((string) $this->callOpenAI($prompt, 40));
+        if ($response === '' || mb_strtoupper($response) === 'NONE') {
+            return null;
+        }
+
+        foreach ($imageCandidates as $url) {
+            if (trim($response) === $url) {
+                return $url;
+            }
+        }
+
+        return null;
+    }
+
     private function buildTitlePrompt(string $content, string $originalTitle, string $lang): string
     {
         $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
@@ -324,6 +433,7 @@ EXEMPLE VALIDE :
             . "Rules:\n"
             . "- Keep only the {$language} version.\n"
             . "- Exclude confidentiality notices, style blocks, signatures, contacts, reply chains, headers, footers and unrelated boilerplate.\n"
+            . "- Exclude About / À propos sections and company boilerplate unless it is essential to understand the news.\n"
             . "- Return clean semantic HTML only.\n"
             . "- Preserve and rebuild the editorial structure with meaningful headings and lists.\n"
             . "- Convert bullet points into proper <ul><li>...</li></ul>.\n"
@@ -567,11 +677,161 @@ EXEMPLE VALIDE :
         return trim($text);
     }
 
+    private function sanitizeExtractedSection(string $text): string
+    {
+        $text = str_replace(["\r\n", "\r"], "\n", trim($text));
+        $lines = preg_split('/\n+/', $text) ?: [];
+        $filtered = [];
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $this->isForbiddenTitleCandidate($line)) {
+                continue;
+            }
+
+            if (preg_match('/^(top|bottom) of form|related articles|leave a comment|additional links|flash news|posted by\s*:|topics\s*:|about\s*:|(?:\d+\s*[–-]\s*)?version\s*(uk|en|english|fr|f|fran[cç]aise?)$/iu', $line) === 1) {
+                continue;
+            }
+
+            $filtered[] = $line;
+        }
+
+        return trim(implode("\n", $filtered));
+    }
+
+    private function buildTitleFromLeadingLines(string $content): string
+    {
+        $lines = preg_split('/\n+/', trim($content)) ?: [];
+        $titleParts = [];
+
+        foreach ($lines as $line) {
+            $line = $this->normalizeTitleCandidate($line);
+            if ($line === '' || $this->isForbiddenTitleCandidate($line)) {
+                continue;
+            }
+
+            if (preg_match('/^[A-Z][a-z]+\s+[–-]\s+[A-Z][a-z]+\s+\d{1,2},\s+\d{4}/u', $line) === 1) {
+                break;
+            }
+
+            if (preg_match('/^[A-Z][A-Za-z\s.-]+\s+[–-]\s+[A-Z][a-z]+\s+\d{1,2},\s+\d{4}/u', $line) === 1) {
+                break;
+            }
+
+            $titleParts[] = $line;
+
+            if (count($titleParts) >= 3) {
+                break;
+            }
+
+            if (mb_strlen(implode(' ', $titleParts)) >= 90) {
+                break;
+            }
+        }
+
+        $title = trim(implode(' ', $titleParts));
+        $title = preg_replace('/\s+/', ' ', $title) ?? $title;
+
+        return trim((string) $title, " ,;:-");
+    }
+
+    private function prepareStructuredPromptText(string $content): string
+    {
+        $text = html_entity_decode($content, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = preg_replace('/<\s*br\s*\/?>/i', "\n", $text) ?? $text;
+        $text = preg_replace('/<\/(p|div|h1|h2|h3|h4|li|ul|ol|blockquote)>/i', "\n", $text) ?? $text;
+        $text = preg_replace('/<(li)[^>]*>/i', '- ', $text) ?? $text;
+        $text = strip_tags($text);
+        $text = str_replace(["\r\n", "\r"], "\n", $text);
+        $text = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
+        $text = preg_replace('/\n{3,}/', "\n\n", $text) ?? $text;
+
+        $lines = preg_split('/\n/', $text) ?: [];
+        $filtered = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                if (!empty($filtered) && end($filtered) !== '') {
+                    $filtered[] = '';
+                }
+                continue;
+            }
+
+            if ($this->isForbiddenTitleCandidate($line)) {
+                continue;
+            }
+
+            $filtered[] = $line;
+        }
+
+        return trim(implode("\n", $filtered));
+    }
+
+    private function splitSectionsHeuristically(string $content): array
+    {
+        $normalized = str_replace(["\r\n", "\r"], "\n", $content);
+
+        $enPatterns = [
+            '/(^|\n)\s*(?:1\s*[–-]\s*)?version\s*(uk|en|english)\b/iu',
+            '/(^|\n)\s*1\s*[–-]\s*version\s*(uk|en|english)\b/iu',
+        ];
+        $frPatterns = [
+            '/(^|\n)\s*(?:2\s*[–-]\s*)?version\s*(fr|f|fran[cç]aise?)\b/iu',
+            '/(^|\n)\s*2\s*[–-]\s*version\s*(fr|f|fran[cç]aise?)\b/iu',
+        ];
+
+        $enStart = $this->findFirstPatternOffset($normalized, $enPatterns);
+        $frStart = $this->findFirstPatternOffset($normalized, $frPatterns);
+
+        $sections = ['FR' => '', 'EN' => ''];
+
+        if ($enStart !== null) {
+            $enContent = substr($normalized, (int) $enStart);
+            if ($frStart !== null && $frStart > $enStart) {
+                $enContent = substr($normalized, (int) $enStart, (int) ($frStart - $enStart));
+            }
+            $sections['EN'] = $this->sanitizeExtractedSection($enContent);
+        }
+
+        if ($frStart !== null) {
+            $frContent = substr($normalized, (int) $frStart);
+            if ($enStart !== null && $enStart > $frStart) {
+                $frContent = substr($normalized, (int) $frStart, (int) ($enStart - $frStart));
+            }
+            $sections['FR'] = $this->sanitizeExtractedSection($frContent);
+        }
+
+        return $sections;
+    }
+
+    private function findFirstPatternOffset(string $content, array $patterns): ?int
+    {
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
+                return $matches[0][1] + strlen($matches[0][0] ?? '');
+            }
+        }
+
+        return null;
+    }
+
     private function generateTitlePayload(string $emailContent, string $originalTitle, string $lang): array
     {
         $cleanOriginalTitle = $this->normalizeTitleCandidate($originalTitle);
         if ($cleanOriginalTitle === '') {
             $cleanOriginalTitle = $this->extractFallbackTitleFromContent($emailContent, $lang);
+        }
+
+        // Deterministic SEO shortening when the source title is too long.
+        if (mb_strlen($cleanOriginalTitle) > 62) {
+            $short = $this->shortenTitleHeuristically($cleanOriginalTitle, $lang);
+            if ($short !== '') {
+                return [
+                    'original' => $cleanOriginalTitle,
+                    'optimized' => $short,
+                    'use_original_in_h2' => true,
+                ];
+            }
         }
 
         $prompt = $this->buildTitlePrompt($emailContent, $cleanOriginalTitle, $lang);
@@ -598,6 +858,73 @@ EXEMPLE VALIDE :
         return $this->normalizeTitleCandidate($optimizedTitle);
     }
 
+    private function shortenTitleHeuristically(string $title, string $lang): string
+    {
+        $title = $this->normalizeTitleCandidate($title);
+        if ($title === '' || mb_strlen($title) <= 62) {
+            return $title;
+        }
+
+        $lc = mb_strtolower($title);
+        $cutTokens = $lang === 'FR'
+            ? [' avec ', ' afin ', ' pour ', ' grâce ', ' via ', ' en vue ', ' dans le cadre ']
+            : [' with ', ' to ', ' via ', ' as part of ', ' for '];
+
+        $compressCommon = function (string $candidate) use ($lang): string {
+            $candidate = preg_replace('/\bcorporation\b/iu', 'Corp', $candidate) ?? $candidate;
+            $candidate = preg_replace('/\bcompany\b/iu', 'Co', $candidate) ?? $candidate;
+            if ($lang === 'FR') {
+                $candidate = preg_replace('/\bsoci[ée]t[ée]\b/iu', 'Sté', $candidate) ?? $candidate;
+            }
+            $candidate = preg_replace('/\s+/', ' ', $candidate) ?? $candidate;
+            return trim($candidate, " ,;:-");
+        };
+
+        foreach ($cutTokens as $token) {
+            $pos = mb_stripos($lc, $token);
+            if ($pos === false || $pos <= 10) {
+                continue;
+            }
+
+            $candidate = trim(mb_substr($title, 0, (int) $pos));
+            $candidate = trim($candidate, " ,;:-");
+            if (mb_strlen($candidate) <= 62 && $this->isDescriptiveTitle($candidate)) {
+                return $candidate;
+            }
+
+            // If just a bit too long, try compressing long organizational words.
+            $compressed = $compressCommon($candidate);
+            if ($compressed !== '' && mb_strlen($compressed) <= 62 && $this->isDescriptiveTitle($compressed)) {
+                return $compressed;
+            }
+        }
+
+        // Last-resort: keep whole words without cutting mid-word.
+        $words = array_values(array_filter(preg_split('/\s+/', $title) ?: [], static fn ($w) => $w !== ''));
+        $acc = '';
+        foreach ($words as $w) {
+            $next = $acc === '' ? $w : ($acc . ' ' . $w);
+            if (mb_strlen($next) > 62) {
+                break;
+            }
+            $acc = $next;
+        }
+
+        $acc = trim($acc);
+        if ($acc !== '' && $this->isDescriptiveTitle($acc)) {
+            if (mb_strlen($acc) <= 62) {
+                return $acc;
+            }
+
+            $compressed = $compressCommon($acc);
+            if ($compressed !== '' && mb_strlen($compressed) <= 62 && $this->isDescriptiveTitle($compressed)) {
+                return $compressed;
+            }
+        }
+
+        return '';
+    }
+
     private function normalizeTitleCandidate(string $title): string
     {
         $title = $this->sanitizePlainText($title);
@@ -612,6 +939,10 @@ EXEMPLE VALIDE :
             return false;
         }
 
+        if ($this->startsWithSuspiciousLowercaseFragment($title)) {
+            return false;
+        }
+
         if (preg_match('/\.\.\.|…$/u', $title) === 1) {
             return false;
         }
@@ -621,6 +952,39 @@ EXEMPLE VALIDE :
         }
 
         return $this->isDescriptiveTitle($title);
+    }
+
+    private function startsWithSuspiciousLowercaseFragment(string $title): bool
+    {
+        $title = trim($title);
+        if ($title === '') {
+            return false;
+        }
+
+        $firstWord = (string) preg_replace('/\s.*$/u', '', $title);
+        if ($firstWord === '') {
+            return false;
+        }
+
+        $firstChar = mb_substr($firstWord, 0, 1);
+        // If it doesn't start with a lowercase letter, we're fine.
+        if (preg_match('/^[a-zàâçéèêëîïôûùüÿñæœ]$/u', $firstChar) !== 1) {
+            return false;
+        }
+
+        // Allow patterns like eVTOL / iPhone / xAI where uppercase appears immediately.
+        $prefix = mb_substr($firstWord, 0, 4);
+        if (preg_match('/[A-Z]/', $prefix) === 1) {
+            return false;
+        }
+
+        // Allow e-commerce like patterns.
+        if (preg_match('/^[a-z]\-/u', $firstWord) === 1) {
+            return false;
+        }
+
+        // Otherwise, likely a clipped fragment (e.g. 'ceives a ...').
+        return true;
     }
 
     private function isDescriptiveTitle(string $title): bool
@@ -732,32 +1096,38 @@ EXEMPLE VALIDE :
     private function extractFallbackTitleFromContent(string $content, string $lang): string
     {
         $text = $this->sanitizePlainText($content);
-        $lines = preg_split('/\n+/', trim($content)) ?: [];
+        $lines = preg_split('/\n+/', trim((string) $content)) ?: [];
 
         foreach ($lines as $line) {
-            $line = $this->sanitizePlainText($line);
+            $line = $this->sanitizePlainText((string) $line);
             if (
-                mb_strlen($line) >= 12
-                && mb_strlen($line) <= 120
+                $line !== ''
+                && mb_strlen($line) >= 12
+                && mb_strlen($line) <= 160
                 && !str_starts_with($line, '•')
                 && !preg_match('/^aeromorning\b/i', $line)
                 && !preg_match('/^[0-9]+[.)]/', $line)
                 && !$this->isForbiddenTitleCandidate($line)
-                && !$this->looksLikeAddressLine($line)
             ) {
-                return $line;
+                $candidate = $this->normalizeTitleCandidate($line);
+                if ($candidate !== '' && !$this->isForbiddenTitleCandidate($candidate)) {
+                    return $candidate;
+                }
             }
         }
 
         $sentences = preg_split('/(?<=[.!?])\s+/', $text) ?: [];
         foreach ($sentences as $sentence) {
-            $sentence = trim($sentence);
+            $sentence = trim((string) $sentence);
             if (mb_strlen($sentence) >= 20) {
-                return $sentence;
+                $candidate = $this->normalizeTitleCandidate($sentence);
+                if ($candidate !== '' && !$this->isForbiddenTitleCandidate($candidate)) {
+                    return $this->smartLimit($candidate, 120);
+                }
             }
         }
 
-        return '';
+        return $this->normalizeTitleCandidate($text);
     }
 
     private function looksLikeAddressLine(string $line): bool
@@ -781,6 +1151,15 @@ EXEMPLE VALIDE :
             return true;
         }
 
+        // Reject category-like strings and menu separators that are not real titles.
+        if (str_contains($title, ' / ') && preg_match('/\b(news|industry|industrie|services)\b/i', $title) === 1) {
+            return true;
+        }
+
+        if (substr_count($title, ',') >= 2 && preg_match('/\b(aeronautique|aéronautique|industrie|industry|environnement|environment|helicopteres?|hélicoptères|news|services)\b/i', $title) === 1) {
+            return true;
+        }
+
         $forbiddenPatterns = [
             '/^(top|bottom) of form$/i',
             '/^related articles$/i',
@@ -790,11 +1169,24 @@ EXEMPLE VALIDE :
             '/^flash news$/i',
             '/^posted by\s*:/i',
             '/^source\s*:/i',
+                '/^about\s*:/i',
+                '/^à propos\s*:/i',
+                '/^ou\s*f\s*news$/i',
+                '/^industry$/i',
+                '/^ou\s*industrie$/i',
+                '/^industry\s*ou\s*industrie$/i',
+                '/^ou\s*f\s*news\s*\/\s*industry\s*ou\s*industrie$/i',
         ];
 
         foreach ($forbiddenPatterns as $pattern) {
             if (preg_match($pattern, $title) === 1) {
                 return true;
+
+            // Deterministic title: first meaningful line of the section (often the headline).
+            $leading = $this->extractLeadingHeadlineLine($plainSection, $lang);
+            if ($leading !== '') {
+                return $leading;
+            }
             }
         }
 
@@ -870,6 +1262,10 @@ EXEMPLE VALIDE :
             ) {
                 continue;
             }
+            
+            if (preg_match('/^aeromorning\b.*\bversion\b/iu', $line) === 1) {
+                continue;
+            }
 
             $usable[] = $line;
         }
@@ -879,6 +1275,45 @@ EXEMPLE VALIDE :
         }
 
         return $this->sanitizePlainText(implode(' ', array_slice($usable, 0, 3)));
+    }
+
+    private function extractLeadingHeadlineLine(string $plainSection, string $lang): string
+    {
+        $lines = preg_split('/\n+/', trim($plainSection)) ?: [];
+        foreach ($lines as $line) {
+            $line = trim((string) $line);
+            if ($line === '') {
+                continue;
+            }
+
+            // Skip version markers and known boilerplate.
+            if (preg_match('/^(?:\d+\s*[–-]\s*)?version\s*(uk|en|english|fr|f|fran[cç]aise?)\b/iu', $line) === 1) {
+                continue;
+            }
+            if (preg_match('/^aeromorning\b/iu', $line) === 1) {
+                continue;
+            }
+
+            $candidate = $this->normalizeTitleCandidate($line);
+            if ($candidate === '' || $this->isForbiddenTitleCandidate($candidate)) {
+                continue;
+            }
+
+            // Avoid clipped fragments like "ceives ...".
+            if ($this->startsWithSuspiciousLowercaseFragment($candidate)) {
+                continue;
+            }
+
+            // Require at least 3 words to look like a headline.
+            $words = array_values(array_filter(preg_split('/\s+/', $candidate) ?: [], static fn ($w) => $w !== ''));
+            if (count($words) < 3) {
+                continue;
+            }
+
+            return $candidate;
+        }
+
+        return '';
     }
 
     private function matchesAviationHeuristic(string $content): bool

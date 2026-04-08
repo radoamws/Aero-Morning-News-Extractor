@@ -196,26 +196,91 @@ class EmailService
      */
     public function extractImageUrlFromHtml(string $html): ?string
     {
-        $preferredRelativeCandidates = [];
+        $candidates = $this->extractImageCandidatesFromHtml($html);
 
-        // Look for img tags and skip internal/header/footer assets.
+        return $candidates[0] ?? null;
+    }
+
+    public function extractImageCandidatesFromHtml(string $html): array
+    {
+        $validCandidates = [];
+
+        $extractIntAttr = static function (string $tag, string $attr): int {
+            if (preg_match('/\b' . preg_quote($attr, '/') . '\s*=\s*["\']?(\d{1,5})/i', $tag, $m) === 1) {
+                return (int) $m[1];
+            }
+            return 0;
+        };
+
+        $extractPxFromStyle = static function (string $tag, string $prop): int {
+            if (preg_match('/\bstyle\s*=\s*["\'][^"\']*\b' . preg_quote($prop, '/') . '\s*:\s*(\d{1,5})\s*px/i', $tag, $m) === 1) {
+                return (int) $m[1];
+            }
+            return 0;
+        };
+
+        $isSmallIcon = static function (string $imgTag) use ($extractIntAttr, $extractPxFromStyle): bool {
+            $w = $extractIntAttr($imgTag, 'width');
+            $h = $extractIntAttr($imgTag, 'height');
+
+            if ($w === 0) {
+                $w = $extractPxFromStyle($imgTag, 'width');
+            }
+            if ($h === 0) {
+                $h = $extractPxFromStyle($imgTag, 'height');
+            }
+
+            if ($w > 0 && $h > 0) {
+                return $w <= 160 && $h <= 160;
+            }
+
+            if ($w > 0) {
+                return $w <= 80;
+            }
+            if ($h > 0) {
+                return $h <= 80;
+            }
+
+            return false;
+        };
+
+        // Look for img tags and skip icons/signatures/header/footer assets.
         if (preg_match_all('/<img\b[^>]*>/i', $html, $matches)) {
             foreach ($matches[0] as $imgTag) {
                 if (!preg_match('/\bsrc=["\']([^"\']+)["\']/i', $imgTag, $srcMatch)) {
                     continue;
                 }
 
+                if ($isSmallIcon($imgTag)) {
+                    continue;
+                }
+
                 $url = (string) $srcMatch[1];
-                if ($this->isForbiddenInlineImageUrl($url, $imgTag)) {
-                    continue;
+
+                $candidateUrls = [$url];
+                if (preg_match('/\bsrcset=["\']([^"\']+)["\']/i', $imgTag, $srcsetMatch) === 1) {
+                    $srcset = trim((string) $srcsetMatch[1]);
+                    if ($srcset !== '') {
+                        $parts = array_map('trim', explode(',', $srcset));
+                        foreach ($parts as $part) {
+                            if ($part === '') {
+                                continue;
+                            }
+                            $urlPart = trim((string) preg_split('/\s+/', $part)[0]);
+                            if ($urlPart !== '') {
+                                $candidateUrls[] = $urlPart;
+                            }
+                        }
+                    }
                 }
 
-                if ($this->isRelativeImageUrl($url)) {
-                    $preferredRelativeCandidates[] = $url;
-                    continue;
-                }
+                foreach ($candidateUrls as $candidateUrl) {
+                    if ($this->isForbiddenInlineImageUrl($candidateUrl, $imgTag)) {
+                        continue;
+                    }
 
-                return $url;
+                    $validCandidates[] = $candidateUrl;
+                }
             }
         }
 
@@ -223,18 +288,12 @@ class EmailService
         if (preg_match_all('/<a[^>]+href=["\']([^"\']+\.(?:jpg|jpeg|png|gif|webp))(?:\?[^"\']*)?["\'][^>]*>/i', $html, $matches)) {
             foreach ($matches[1] as $url) {
                 if (!$this->isForbiddenInlineImageUrl((string) $url)) {
-                    return $url;
+                    $validCandidates[] = $url;
                 }
             }
         }
 
-        foreach ($preferredRelativeCandidates as $url) {
-            if (!$this->isForbiddenInlineImageUrl($url)) {
-                return $url;
-            }
-        }
-
-        return null;
+        return array_values(array_unique($validCandidates));
     }
 
     private function isForbiddenInlineImageUrl(string $url, string $imgTag = ''): bool
@@ -254,18 +313,23 @@ class EmailService
             return true;
         }
 
+        // In forwarded emails, relative image URLs (starting with / or without scheme) are unreliable and
+        // frequently correspond to webmail/header/footer assets. We block them entirely.
         if ($this->isRelativeImageUrl($normalizedUrl)) {
-            if ($normalizedTag === '') {
-                return true;
-            }
+            return true;
+        }
 
-            if (preg_match('/logo|header|footer|icon|social|linkedin|facebook|twitter|instagram|youtube|banner|banniere|webmail|roundcube|amws|aeromorning|thales/i', $normalizedTag) === 1) {
-                return true;
-            }
+        // Broad blocklist for signatures/social/share/decoration, regardless of absolute/relative URLs.
+        if (preg_match('/\b(logo|favicon|sprite|icon|icons|social|share|addtoany|addthis|facebook|twitter|x\.com|linkedin|pinterest|instagram|youtube|whatsapp|telegram|reddit|button|badge|avatar|gravatar|signature|tracking|pixel|spacer|1x1|doubleclick|mailchimp|roundcube|webmail|banner|banniere|ads|advert|promo)\b/i', $normalizedUrl) === 1) {
+            return true;
+        }
 
-            if (preg_match('/logo|header|footer|icon|social|linkedin|facebook|twitter|instagram|youtube|banner|banniere|webmail|roundcube|amws|aeromorning|thales/i', $normalizedUrl) === 1) {
-                return true;
-            }
+        if (preg_match('/\bwp-content\/plugins\b|\bwp-includes\/(images|css)\b/i', $normalizedUrl) === 1) {
+            return true;
+        }
+
+        if (preg_match('/\.(svg)(\?|#|$)/i', $normalizedUrl) === 1) {
+            return true;
         }
 
         return false;
