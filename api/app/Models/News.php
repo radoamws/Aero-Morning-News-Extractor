@@ -11,6 +11,7 @@ class News extends Model
         'lang',
         'title',
         'content',
+        'content_brut',
         'metadescription',
         'focuskeyphrase',
         'categories',

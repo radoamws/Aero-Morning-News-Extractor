@@ -282,25 +282,36 @@ EXEMPLE VALIDE :
 
     public function extractNewsSections(string $content): array
     {
-        $structuredContent = $this->prepareStructuredPromptText($content);
+        $structuredContent = $this->prepareStructuredPromptHtml($content);
+        $structuredPlain = $this->prepareStructuredPromptText($content);
+
         if ($structuredContent === '') {
             return ['FR' => '', 'EN' => ''];
         }
 
         $prompt = "You are extracting aviation news sections from a forwarded email.\n"
             . "Return a strict JSON object with exactly two keys: FR and EN.\n"
-            . "Each value must contain ONLY the relevant article section in that language.\n"
+            . "Each value must contain ONLY the relevant article section in that language, as HTML.\n"
             . "If a language is absent, return an empty string for that key.\n"
-                . "Ignore forwarded-email boilerplate, webmail headers/footers, signatures, confidentiality notices, menus, related articles, top/bottom of form markers, comment blocks, duplicated translated headers, and About / À propos corporate boilerplate blocks.\n"
-            . "Preserve the exact article lines in each language section.\n"
-            . "Do not summarize. Do not translate. Do not add any text outside JSON.\n\n"
+            . "Ignore forwarded-email boilerplate, webmail headers/footers, signatures, confidentiality notices, menus, related articles, top/bottom of form markers, comment blocks, duplicated translated headers, and About / À propos corporate boilerplate blocks.\n"
+            . "IMPORTANT HTML RULES:\n"
+            . "- The input is the raw HTML email body (lightly cleaned only to remove unsafe blocks).\n"
+            . "- You MUST keep real HTML tags like <p>, <br>, <strong>, <em>, <ul>, <ol>, <li>, <a>, <h2>, <h3>, <blockquote>, <div>, <span> when they appear in the relevant section.\n"
+            . "- Do NOT return escaped tags like &lt;p&gt;. Return real HTML.\n"
+            . "- Do NOT add <html>, <head>, <body>, <style>, <script>, tables, or office markup.\n"
+            . "- Do NOT translate. Do NOT summarize.\n"
+            . "Return JSON only (double quotes, properly escaped).\n\n"
             . mb_substr($structuredContent, 0, 12000);
 
         $response = trim((string) $this->callOpenAI($prompt, 900));
         $decoded = json_decode($response, true);
 
+        if (!is_array($decoded) && preg_match('/\{.*\}/s', $response, $matches) === 1) {
+            $decoded = json_decode($matches[0], true);
+        }
+
         if (!is_array($decoded)) {
-            return $this->splitSectionsHeuristically($structuredContent);
+            return $this->splitSectionsHeuristically($structuredPlain !== '' ? $structuredPlain : strip_tags($structuredContent));
         }
 
         $sections = [
@@ -309,19 +320,47 @@ EXEMPLE VALIDE :
         ];
 
         if (($sections['FR'] === '') && ($sections['EN'] === '')) {
-            return $this->splitSectionsHeuristically($structuredContent);
+            return $this->splitSectionsHeuristically($structuredPlain !== '' ? $structuredPlain : strip_tags($structuredContent));
         }
         
             // If the email clearly contains explicit bilingual markers (Version UK / Version F/FR),
             // prefer a deterministic split to avoid any title/image/header noise.
-            if ($this->looksLikeVersionBilingualEmail($structuredContent)) {
-                $sections = $this->splitSectionsHeuristically($structuredContent);
+            if ($this->looksLikeVersionBilingualEmail($structuredPlain !== '' ? $structuredPlain : strip_tags($structuredContent))) {
+                $sections = $this->splitSectionsHeuristically($structuredPlain !== '' ? $structuredPlain : strip_tags($structuredContent));
                 if (trim($sections['FR']) !== '' || trim($sections['EN']) !== '') {
                     return $sections;
                 }
             }
 
         return $sections;
+    }
+
+    private function prepareStructuredPromptHtml(string $content): string
+    {
+        $html = trim((string) $content);
+        if ($html === '') {
+            return '';
+        }
+
+        $html = html_entity_decode($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        // Remove unsafe/noisy blocks.
+        $html = preg_replace('/<style\b[^>]*>.*?<\/style>/is', ' ', $html) ?? $html;
+        $html = preg_replace('/<script\b[^>]*>.*?<\/script>/is', ' ', $html) ?? $html;
+        $html = preg_replace('/<head\b[^>]*>.*?<\/head>/is', ' ', $html) ?? $html;
+        $html = preg_replace('/<!--.*?-->/s', ' ', $html) ?? $html;
+        $html = preg_replace('/<(meta|link|xml|o:p)\b[^>]*>.*?<\/\1>/is', ' ', $html) ?? $html;
+        $html = preg_replace('/<(meta|link)\b[^>]*\/?>(\s*)/is', ' ', $html) ?? $html;
+
+        // Remove inline images from the content fed to section extraction.
+        $html = preg_replace('/<img\b[^>]*>/i', ' ', $html) ?? $html;
+
+        // Cleanup whitespace.
+        $html = preg_replace('/[ \t]+/', ' ', $html) ?? $html;
+        $html = preg_replace('/\s*\n\s*/', "\n", $html) ?? $html;
+        $html = preg_replace('/\n{3,}/', "\n\n", $html) ?? $html;
+
+        return trim($html);
     }
 
     public function extractOriginalArticleTitle(string $sectionContent, string $lang, string $subject = ''): string
@@ -435,14 +474,17 @@ EXEMPLE VALIDE :
             . "- Keep only the {$language} version.\n"
             . "- Exclude confidentiality notices, style blocks, signatures, contacts, reply chains, headers, footers and unrelated boilerplate.\n"
             . "- Exclude About / À propos sections and company boilerplate unless it is essential to understand the news.\n"
-            . "- Return clean semantic HTML only.\n"
+            . "- Return clean semantic HTML only (REAL TAGS, not escaped).\n"
+            . "- The input may contain <div>/<span> and inline styles; convert formatting into semantic tags (<p>, <br>, <strong>, <em>, lists).\n"
+            . "- Preserve emphasis (bold/italic) and line breaks from the source when relevant.\n"
             . "- Preserve and rebuild the editorial structure with meaningful headings and lists.\n"
             . "- Convert bullet points into proper <ul><li>...</li></ul>.\n"
             . "- Convert numbered lists into proper <ol><li>...</li></ol>.\n"
             . "- Use <h2> for main sections and <h3> for subsections when the source structure justifies it.\n"
             . "- Use <p>, <ul>, <ol>, <li>, <a>, <strong>, <em>, <blockquote>, <h2>, <h3> only when relevant.\n"
-            . "- Do not include CSS, <style>, <head>, <body>, <html>, tables, or office markup.\n"
+            . "- Do not include CSS, <style>, <script>, <head>, <body>, <html>, tables, or office markup.\n"
             . "- Keep factual content only.\n"
+            . "- Never return plain text: always wrap paragraphs in <p> and use <br> for line breaks when needed.\n"
             . "- Return HTML only.\n\n"
 
             . "TITLE HANDLING RULE (VERY IMPORTANT):\n"
@@ -518,26 +560,46 @@ EXEMPLE VALIDE :
     {
         $candidate = trim((string) $html);
 
-        if ($candidate === '' || strpos($candidate, '<') === false) {
-            $candidate = '';
-        }
-
-        if ($candidate !== '') {
-            $candidate = preg_replace('/<(html|head|body|style|table|tbody|thead|tfoot|tr|td|th)[^>]*>/i', '', $candidate) ?? $candidate;
-            $candidate = preg_replace('/<\/(html|head|body|style|table|tbody|thead|tfoot|tr|td|th)>/i', '', $candidate) ?? $candidate;
-            $candidate = preg_replace('/\sstyle="[^"]*"/i', '', $candidate) ?? $candidate;
-            $candidate = preg_replace('/\sclass="[^"]*"/i', '', $candidate) ?? $candidate;
-            $candidate = preg_replace('/\sid="[^"]*"/i', '', $candidate) ?? $candidate;
-            $candidate = strip_tags($candidate, '<h1><h2><h3><h4><p><ul><ol><li><a><img><strong><em><blockquote><br>');
+        if ($candidate !== '' && strpos($candidate, '<') !== false) {
+            // Minimal safety cleanup only (avoid destructive tag stripping which breaks email HTML).
             $candidate = html_entity_decode($candidate, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            $candidate = preg_replace('/<script\b[^>]*>.*?<\/script>/is', ' ', $candidate) ?? $candidate;
+            $candidate = preg_replace('/<style\b[^>]*>.*?<\/style>/is', ' ', $candidate) ?? $candidate;
+            $candidate = preg_replace('/<(html|head|body|table|tbody|thead|tfoot|tr|td|th)[^>]*>/i', '', $candidate) ?? $candidate;
+            $candidate = preg_replace('/<\/(html|head|body|table|tbody|thead|tfoot|tr|td|th)>/i', '', $candidate) ?? $candidate;
         }
 
         $text = trim(strip_tags($candidate));
         if ($text === '' || mb_strlen($text) < 120) {
-            $candidate = '<h2>' . e($title) . '</h2><p>' . nl2br(e(trim(strip_tags($fallbackContent)))) . '</p>';
+            $repaired = $this->repairHtmlArticleViaOpenAI($fallbackContent, $title, $lang);
+            if ($repaired !== '' && strpos($repaired, '<') !== false && mb_strlen(trim(strip_tags($repaired))) >= 120) {
+                $candidate = $repaired;
+            } else {
+                $candidate = '<h2>' . e($title) . '</h2><p>' . nl2br(e(trim(strip_tags($fallbackContent)))) . '</p>';
+            }
         }
 
         return trim($candidate);
+    }
+
+    private function repairHtmlArticleViaOpenAI(string $fallbackContent, string $title, string $lang): string
+    {
+        $language = $lang === 'FR' ? 'FRENCH' : 'ENGLISH';
+
+        $prompt = "You are fixing an HTML extraction for an aviation news workflow.\n"
+            . "Language: {$language}.\n"
+            . "Goal: return clean semantic HTML for publication while preserving the original formatting meaning (bold/italic/line breaks/lists).\n"
+            . "Rules:\n"
+            . "- Output MUST be valid HTML with real tags, not escaped.\n"
+            . "- Start exactly with <h2>{$title}</h2> and never change that H2 text.\n"
+            . "- After the H2, use <p>, <br>, <strong>, <em>, <ul>, <ol>, <li>, <a>, <blockquote>, <h3> only as needed.\n"
+            . "- Do not include <html>, <head>, <body>, <style>, <script>, tables, or office markup.\n"
+            . "- Do not translate, do not summarize, do not invent facts.\n"
+            . "- Remove signatures, confidentiality notices, menus, and unrelated boilerplate.\n"
+            . "Return HTML only.\n\n"
+            . $fallbackContent;
+
+        return trim((string) $this->callOpenAI($prompt, 1400));
     }
 
     private function sanitizeMetaDescription(?string $value, string $content, string $lang): ?string
@@ -681,6 +743,12 @@ EXEMPLE VALIDE :
     private function sanitizeExtractedSection(string $text): string
     {
         $text = str_replace(["\r\n", "\r"], "\n", trim($text));
+
+        // If the model already returned HTML, avoid line-based filtering that can break tags.
+        if ($text !== '' && strpos($text, '<') !== false) {
+            return $text;
+        }
+
         $lines = preg_split('/\n+/', $text) ?: [];
         $filtered = [];
 
@@ -688,7 +756,7 @@ EXEMPLE VALIDE :
             $line = trim($line);
             if ($line === '' || $this->isForbiddenTitleCandidate($line)) {
                 continue;
-            }
+            } 
 
             if (preg_match('/^(top|bottom) of form|related articles|leave a comment|additional links|flash news|posted by\s*:|topics\s*:|about\s*:|(?:\d+\s*[–-]\s*)?version\s*(uk|en|english|fr|f|fran[cç]aise?)$/iu', $line) === 1) {
                 continue;

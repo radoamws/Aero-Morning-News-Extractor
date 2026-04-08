@@ -161,6 +161,11 @@ class NewsController extends Controller
         try {
             // Extract email content
             $emailContent = $this->emailService->extractEmailContent($mail);
+
+            $contentBrut = json_encode($emailContent, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if (!is_string($contentBrut)) {
+                $contentBrut = '';
+            } 
             
             // Check if email is duplicate
             $existingLangs = [];
@@ -258,7 +263,8 @@ class NewsController extends Controller
                         $emailContent['message_id'],
                         $imageUrl,
                         $frenchOriginalTitle,
-                        $frenchSource
+                        $frenchSource,
+                        $contentBrut
                     ) || $createdAny;
                 }
             }
@@ -278,7 +284,8 @@ class NewsController extends Controller
                         $emailContent['message_id'],
                         $imageUrl,
                         $englishOriginalTitle,
-                        $englishSource
+                        $englishSource,
+                        $contentBrut
                     ) || $createdAny;
                 }
             }
@@ -419,7 +426,8 @@ class NewsController extends Controller
         string $messageId,
         ?string $imageUrl,
         string $originalTitle,
-        string $sourceHint
+        string $sourceHint,
+        string $contentBrut
     ): bool
     {
         try {
@@ -467,6 +475,7 @@ class NewsController extends Controller
                 'lang' => 'FR',
                 'title' => trim(strip_tags($titleFr)),
                 'content' => $contentFr,
+                'content_brut' => $contentBrut,
                 'metadescription' => $metaDescFr ?? '',
                 'focuskeyphrase' => $keyPhraseFr ?? '',
                 'categories' => $categoriesString ?? '',
@@ -493,7 +502,8 @@ class NewsController extends Controller
         string $messageId,
         ?string $imageUrl,
         string $originalTitle,
-        string $sourceHint
+        string $sourceHint,
+        string $contentBrut
     ): bool
     {
         try {
@@ -541,6 +551,7 @@ class NewsController extends Controller
                 'lang' => 'EN',
                 'title' => trim(strip_tags($titleEn)),
                 'content' => $contentEn,
+                'content_brut' => $contentBrut,
                 'metadescription' => $metaDescEn ?? '',
                 'focuskeyphrase' => $keyPhraseEn ?? '',
                 'categories' => $categoriesString ?? '',
@@ -736,15 +747,11 @@ class NewsController extends Controller
             $body = $dom->saveHTML() ?: $clean;
         }
 
-        $body = preg_replace('/\sstyle="[^"]*"/i', '', $body) ?? $body;
-        $body = preg_replace('/\sclass="[^"]*"/i', '', $body) ?? $body;
-        $body = preg_replace('/\sid="[^"]*"/i', '', $body) ?? $body;
-        $body = preg_replace('/<(span|font)[^>]*>/i', '', $body) ?? $body;
-        $body = preg_replace('/<div[^>]*>/i', '', $body) ?? $body;
-        $body = preg_replace('/<\/(span|font|div)>/i', '', $body) ?? $body;
+        // Keep original HTML structure (div/span/styles) so formatting is not destroyed.
+        // Only minimal cleanup is applied above to remove unsafe/noisy blocks.
         $body = preg_replace('/<p>\s*<\/p>/i', '', $body) ?? $body;
 
-        return trim(strip_tags($body, '<h1><h2><h3><h4><p><ul><ol><li><a><strong><em><blockquote><br>'));
+        return trim($body);
     }
 
     private function convertPlainTextToHtmlFragment(string $plain): string
@@ -1355,12 +1362,9 @@ class NewsController extends Controller
             return '';
         }
 
+        // Minimal safety cleanup only (avoid stripping div/span/attributes which breaks formatting).
         $html = preg_replace('/<(html|head|body|style|script|table|tbody|thead|tfoot|tr|td|th)[^>]*>/i', '', $html) ?? $html;
         $html = preg_replace('/<\/(html|head|body|style|script|table|tbody|thead|tfoot|tr|td|th)>/i', '', $html) ?? $html;
-        $html = preg_replace('/\sstyle="[^"]*"/i', '', $html) ?? $html;
-        $html = preg_replace('/\sclass="[^"]*"/i', '', $html) ?? $html;
-        $html = preg_replace('/\sid="[^"]*"/i', '', $html) ?? $html;
-        $html = strip_tags($html, '<h1><h2><h3><h4><p><ul><ol><li><a><strong><em><blockquote><br>');
         $html = preg_replace('/<p>\s*[-•*]\s*(.*?)<\/p>/iu', '<ul><li>$1</li></ul>', $html) ?? $html;
         $html = preg_replace('/<p>\s*\d+[.)]\s*(.*?)<\/p>/iu', '<ol><li>$1</li></ol>', $html) ?? $html;
         $html = preg_replace('/(?:<ul>\s*){2,}/i', '<ul>', $html) ?? $html;
