@@ -616,10 +616,19 @@ class NewsController extends Controller
                 return $candidate;
             }
 
-            $limited = $this->limitFallbackTitle($candidate, 62);
-            if ($limited !== '') {
-                return $limited;
+            $context = trim($subject . "\n" . $originalTitle);
+            $rewritten = $this->openaiService->rewriteTitleToFitPublic(
+                $candidate,
+                $context !== '' ? $context : $candidate,
+                $lang
+            );
+
+            if ($rewritten !== '' && mb_strlen($rewritten) <= 62) {
+                return $rewritten;
             }
+
+            // As a last resort: keep the full title (no truncation/cropping in PHP).
+            return $candidate;
         }
 
         return '';
@@ -630,28 +639,6 @@ class NewsController extends Controller
         $clean = trim((string) preg_replace('/^(RE|FW|FWD|TR|CP)\s*:\s*/i', '', $value));
         $clean = preg_replace('/\s*[-|:]\s*(version|v)\s*\d+$/i', '', $clean) ?? $clean;
         return trim((string) $clean, " ,;:-");
-    }
-
-    private function limitFallbackTitle(string $title, int $maxLength): string
-    {
-        $title = trim($title);
-        if ($title === '') {
-            return '';
-        }
-
-        if (mb_strlen($title) <= $maxLength) {
-            return $title;
-        }
-
-        $slice = trim(mb_substr($title, 0, $maxLength + 1));
-        $lastSpace = mb_strrpos($slice, ' ');
-        $limited = $lastSpace !== false
-            ? trim(mb_substr($slice, 0, $lastSpace))
-            : trim(mb_substr($title, 0, $maxLength));
-
-        $limited = preg_replace('/\b(and|or|to|for|of|in|on|with|without|from|by|et|ou|de|du|des|dans|sur|pour|avec|sans|chez)\s*$/iu', '', $limited) ?? $limited;
-
-        return trim((string) $limited, " ,;:-");
     }
 
     private function fallbackContent(string $rawContent, string $title, string $lang): string
@@ -685,7 +672,16 @@ class NewsController extends Controller
                 : 'Derniere actualite aviation generee depuis un email entrant.';
         }
 
-        return mb_substr($text, 0, 141);
+        // No PHP truncation: prefer a short sentence if available, otherwise return as-is.
+        $sentences = preg_split('/(?<=[.!?])\s+/', $text) ?: [];
+        foreach ($sentences as $sentence) {
+            $sentence = trim((string) $sentence);
+            if ($sentence !== '' && mb_strlen($sentence) <= 141) {
+                return $sentence;
+            }
+        }
+
+        return $text;
     }
 
     private function fallbackKeyphrase(string $title): string
@@ -1600,6 +1596,10 @@ class NewsController extends Controller
             $score = $size;
 
             if (preg_match('/logo|icon|signature|linkedin|facebook|twitter|instagram|header|footer/', $name)) {
+                $score -= 500000;
+            }
+
+            if (preg_match('/amws|endless|possibilities|constellation/', $name)) {
                 $score -= 500000;
             }
 

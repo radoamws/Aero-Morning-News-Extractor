@@ -371,6 +371,7 @@ EXEMPLE VALIDE :
         $prompt = "You are selecting the featured image for an aviation news article extracted from a forwarded email.\n"
             . "Choose the single image URL that is most likely the main article image.\n"
             . "Reject logos, banners, sponsor images, signatures, social icons, webmail assets, headers, footers, and decorative graphics.\n"
+            . "Never choose the AMWS email signature banner (blue 'Endless possibilities', 'Constellation', or anything linked to 'amws.space').\n"
             . "Return only one exact URL from the candidate list below. If none is suitable, return NONE.\n\n"
             . "ARTICLE EXCERPT:\n" . mb_substr($this->prepareStructuredPromptText($content), 0, 2500) . "\n\n"
             . "IMAGE CANDIDATES:\n{$candidateList}";
@@ -822,18 +823,6 @@ EXEMPLE VALIDE :
             $cleanOriginalTitle = $this->extractFallbackTitleFromContent($emailContent, $lang);
         }
 
-        // Deterministic SEO shortening when the source title is too long.
-        if (mb_strlen($cleanOriginalTitle) > 62) {
-            $short = $this->shortenTitleHeuristically($cleanOriginalTitle, $lang);
-            if ($short !== '') {
-                return [
-                    'original' => $cleanOriginalTitle,
-                    'optimized' => $short,
-                    'use_original_in_h2' => true,
-                ];
-            }
-        }
-
         $prompt = $this->buildTitlePrompt($emailContent, $cleanOriginalTitle, $lang);
         $optimizedTitle = $this->sanitizeTitle($this->callOpenAI($prompt, 80), $cleanOriginalTitle, $emailContent, $lang);
 
@@ -858,71 +847,9 @@ EXEMPLE VALIDE :
         return $this->normalizeTitleCandidate($optimizedTitle);
     }
 
-    private function shortenTitleHeuristically(string $title, string $lang): string
+    public function rewriteTitleToFitPublic(string $sourceTitle, string $content, string $lang): string
     {
-        $title = $this->normalizeTitleCandidate($title);
-        if ($title === '' || mb_strlen($title) <= 62) {
-            return $title;
-        }
-
-        $lc = mb_strtolower($title);
-        $cutTokens = $lang === 'FR'
-            ? [' avec ', ' afin ', ' pour ', ' grâce ', ' via ', ' en vue ', ' dans le cadre ']
-            : [' with ', ' to ', ' via ', ' as part of ', ' for '];
-
-        $compressCommon = function (string $candidate) use ($lang): string {
-            $candidate = preg_replace('/\bcorporation\b/iu', 'Corp', $candidate) ?? $candidate;
-            $candidate = preg_replace('/\bcompany\b/iu', 'Co', $candidate) ?? $candidate;
-            if ($lang === 'FR') {
-                $candidate = preg_replace('/\bsoci[ée]t[ée]\b/iu', 'Sté', $candidate) ?? $candidate;
-            }
-            $candidate = preg_replace('/\s+/', ' ', $candidate) ?? $candidate;
-            return trim($candidate, " ,;:-");
-        };
-
-        foreach ($cutTokens as $token) {
-            $pos = mb_stripos($lc, $token);
-            if ($pos === false || $pos <= 10) {
-                continue;
-            }
-
-            $candidate = trim(mb_substr($title, 0, (int) $pos));
-            $candidate = trim($candidate, " ,;:-");
-            if (mb_strlen($candidate) <= 62 && $this->isDescriptiveTitle($candidate)) {
-                return $candidate;
-            }
-
-            // If just a bit too long, try compressing long organizational words.
-            $compressed = $compressCommon($candidate);
-            if ($compressed !== '' && mb_strlen($compressed) <= 62 && $this->isDescriptiveTitle($compressed)) {
-                return $compressed;
-            }
-        }
-
-        // Last-resort: keep whole words without cutting mid-word.
-        $words = array_values(array_filter(preg_split('/\s+/', $title) ?: [], static fn ($w) => $w !== ''));
-        $acc = '';
-        foreach ($words as $w) {
-            $next = $acc === '' ? $w : ($acc . ' ' . $w);
-            if (mb_strlen($next) > 62) {
-                break;
-            }
-            $acc = $next;
-        }
-
-        $acc = trim($acc);
-        if ($acc !== '' && $this->isDescriptiveTitle($acc)) {
-            if (mb_strlen($acc) <= 62) {
-                return $acc;
-            }
-
-            $compressed = $compressCommon($acc);
-            if ($compressed !== '' && mb_strlen($compressed) <= 62 && $this->isDescriptiveTitle($compressed)) {
-                return $compressed;
-            }
-        }
-
-        return '';
+        return $this->rewriteTitleToFit($sourceTitle, $content, $lang);
     }
 
     private function normalizeTitleCandidate(string $title): string
@@ -1169,24 +1096,18 @@ EXEMPLE VALIDE :
             '/^flash news$/i',
             '/^posted by\s*:/i',
             '/^source\s*:/i',
-                '/^about\s*:/i',
-                '/^à propos\s*:/i',
-                '/^ou\s*f\s*news$/i',
-                '/^industry$/i',
-                '/^ou\s*industrie$/i',
-                '/^industry\s*ou\s*industrie$/i',
-                '/^ou\s*f\s*news\s*\/\s*industry\s*ou\s*industrie$/i',
+            '/^about\s*:/i',
+            '/^à propos\s*:/i',
+            '/^ou\s*f\s*news$/i',
+            '/^industry$/i',
+            '/^ou\s*industrie$/i',
+            '/^industry\s*ou\s*industrie$/i',
+            '/^ou\s*f\s*news\s*\/\s*industry\s*ou\s*industrie$/i',
         ];
 
         foreach ($forbiddenPatterns as $pattern) {
             if (preg_match($pattern, $title) === 1) {
                 return true;
-
-            // Deterministic title: first meaningful line of the section (often the headline).
-            $leading = $this->extractLeadingHeadlineLine($plainSection, $lang);
-            if ($leading !== '') {
-                return $leading;
-            }
             }
         }
 

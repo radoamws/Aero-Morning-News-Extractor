@@ -305,6 +305,29 @@ class EmailService
             return true;
         }
 
+        // Hard block: known email signature banner assets.
+        if (
+            ($normalizedTag !== '' && preg_match('/endless\s+possibilities|constellation|www\.amws\.space|amws\.space/i', $normalizedTag) === 1)
+            || preg_match('/endless\s*possibilities|constellation/i', $normalizedUrl) === 1
+        ) {
+            return true;
+        }
+
+        // Some webmails proxy images like: https://ci*.googleusercontent.com/...#https://origin.example/img.png
+        // Inspect the fragment too so the origin URL can be blocked.
+        if (str_contains($normalizedUrl, '#')) {
+            $fragment = (string) substr($normalizedUrl, (int) strrpos($normalizedUrl, '#') + 1);
+            if ($fragment !== '' && preg_match('/^https?:\/\//i', $fragment) === 1) {
+                if (
+                    str_contains($fragment, 'amws.space')
+                    || str_contains($fragment, 'amws')
+                    || preg_match('/endless\s*possibilities|constellation/i', $fragment) === 1
+                ) {
+                    return true;
+                }
+            }
+        }
+
         if (
             str_contains($normalizedUrl, 'amws.space')
             || str_contains($normalizedUrl, 'amws')
