@@ -5,14 +5,169 @@ namespace App\Services;
 use OpenAI\Client;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use GuzzleHttp\Client as GuzzleClient;
 
 class OpenAIService
 {
     private Client $client;
 
+    private const WP_JSON_KEYS = [
+        'titleFR',
+        'shorttitleFR',
+        'titleEN',
+        'shorttitleEN',
+        'FR',
+        'EN',
+        'metadescriptionFR',
+        'metadescriptionEN',
+        'focuskeyphraseFR',
+        'focuskeyphraseEN',
+    ];
+
     public function __construct()
     {
-        $this->client = \OpenAI::client(env('OPENAI_API_KEY'));
+        $apiKey = (string) env('OPENAI_API_KEY');
+
+        $httpClient = new GuzzleClient([
+            'timeout' => (float) env('OPENAI_HTTP_TIMEOUT', 120),
+            'connect_timeout' => (float) env('OPENAI_HTTP_CONNECT_TIMEOUT', 20),
+        ]);
+
+        $this->client = \OpenAI::factory()
+            ->withApiKey($apiKey)
+            ->withHttpClient($httpClient)
+            ->make();
+    }
+
+    /**
+     * Extract both FR and EN news payloads for WordPress from a forwarded email.
+     *
+     * IMPORTANT: As requested, we append the raw $emailContent (json-encoded) at the end of the prompt.
+     * No PHP-side cleaning/formatting is performed on the returned payload.
+     */
+    public function extractWordPressNewsJson(array $emailContent, int $maxRetries = 3): ?array
+    {
+        $emailJson = json_encode($emailContent, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($emailJson) || trim($emailJson) === '') {
+            return null;
+        }
+
+        $basePrompt = $this->buildWordPressExtractionPrompt($emailJson);
+        $lastRaw = null;
+        $lastErrors = [];
+
+        for ($attempt = 1; $attempt <= max(1, $maxRetries); $attempt++) {
+            $prompt = ($attempt === 1 || $lastRaw === null)
+                ? $basePrompt
+                : $this->buildWordPressRepairPrompt($emailJson, (string) $lastRaw, $lastErrors);
+
+            $raw = $this->callOpenAI($prompt, 6000, 0.0);
+            $lastRaw = $raw;
+
+            if ($raw === null) {
+                $lastErrors = ['openai_call_failed'];
+                continue;
+            }
+
+            $decoded = $this->decodeJsonObject($raw);
+            if (!is_array($decoded)) {
+                $lastErrors = ['invalid_json'];
+                continue;
+            }
+
+            $errors = $this->validateWordPressNewsPayload($decoded);
+            if (empty($errors)) {
+                return $decoded;
+            }
+
+            $lastErrors = $errors;
+        }
+
+        Log::warning('OpenAI extractWordPressNewsJson failed validation', [
+            'errors' => $lastErrors,
+            'raw_excerpt' => is_string($lastRaw) ? mb_substr($lastRaw, 0, 1200) : null,
+        ]);
+
+        return null;
+    }
+
+    private function buildWordPressExtractionPrompt(string $emailJson): string
+    {
+        return "L'idée est de lire, analyser le contenu d'un mail en HTML et retourner les informations dans la description suivante pour être ajouter automatiquement dans wordpress.\n"
+            . "Voici les descriptions:\n"
+            . " - Voici un extraction de mail transféré en html qui contient des actualités aéronautique et spatial en version française et anglaise. Il peut contenir des html du header, footer, forwarder, ... que tu ne doit pas prendre en compte.\n"
+            . " - Analyse bien le contenu du mail selon les textes.\n"
+            . " - Prépare un JSON avec les clés \"titleFR\", \"shorttitleFR\", \"titleEN\", \"shorttitleEN\",\"FR\",\"EN\", \"metadescriptionFR\", \"metadescriptionEN\", \"focuskeyphraseFR\" et \"focuskeyphraseEN\".\n"
+            . " - Après analyse, Fait une extraction du titre de la section française et met dans le JSON \"titleFR\" en texte brut sans HTML. Faire pareil pour la version EN mais a mettre dans \"titleEN\".\n"
+            . " - si le \"titleFR\" dépasse les 62 caractères, reformule la phrase pour que ça soit moins de 62 caractères pour le SEO et met dans le json \"shorttitleFR\". Sinon, met directement le \"titleFR\" dans \"shorttitleFR\". Faire pareil pour la version EN mais a mettre dans la clé \"shorttitleEN\" du JSON.\n"
+            . " - Fait un extraction du contenu de la version française tout en gardant les balises html pour la mise en page. (gras, saut de ligne, puce (ul, li, ...), italique, ...). Bien enlever tout ce qui ne concerne pas la news (actualité), mais garde la description de la société (A propos ...). Si la source de l'article n'est pas mentionné dans le contenu, ajoute à la fin ce format avec la source identifié \"Source: <le_nom_de_la_source>\" (la source peu être la société concerné ou aeromorning même si c'est mentionné). Encode-le dans la valeur de la clé FR du JSON. Si le \"titleFR\" dessus a dépassé les 62 caractères, modifie dans ce contenu HTML FR le titre complet \"titleFR\" pour que ça soit dans une balise h2, sinon l'enlever du contenu. Faire pareil pour la version EN mais a mettre dans le clé EN du JSON.\n"
+            . " - Génère un metadescription selon le contenu FR qui doit strictement faire entre 107 et 142 caractères et le mettre dans le JSON \"metadescriptionFR\". Faire pareil pour la version EN mais a mettre dans \"metadescriptionEN\" du JSON.\n"
+            . " - Génère un FocusKeyPhrase depuis le contenu FR qui ne doit strictement pas avoir une virgule et le mettre dans \"focuskeyphraseFR\". Faire pareil pour la version EN mais a mettre dans \"focuskeyphraseEN\" du JSON.\n"
+            . " - Me retourner le JSON bien échappé car ça sera utilisé dans PHP.\n\n"
+            . "IMPORTANT: Tu dois retourner uniquement le JSON brut (pas de Markdown, pas de ```). Le JSON doit être valide et parseable par json_decode en PHP. Les champs FR/EN contiennent du HTML avec de vraies balises (pas de &lt;p&gt;).\n\n"
+            . "Voici le contenu du mail:\n\n"
+            . $emailJson;
+    }
+
+    private function buildWordPressRepairPrompt(string $emailJson, string $previousRaw, array $errors): string
+    {
+        $errorsText = implode(', ', $errors);
+
+        return "Tu as retourné une réponse invalide/non conforme pour json_decode().\n"
+            . "Corrige ta réponse et retourne UNIQUEMENT un JSON valide (pas de Markdown, pas de ```).\n"
+            . "Le JSON doit contenir exactement les clés suivantes: " . implode(', ', self::WP_JSON_KEYS) . ".\n"
+            . "Erreurs à corriger: {$errorsText}.\n\n"
+            . "RÉPONSE PRÉCÉDENTE (à corriger):\n"
+            . mb_substr($previousRaw, 0, 8000)
+            . "\n\nVoici le contenu du mail:\n\n"
+            . $emailJson;
+    }
+
+    private function decodeJsonObject(?string $raw): ?array
+    {
+        if (!is_string($raw)) {
+            return null;
+        }
+
+        $raw = trim($raw);
+        if ($raw === '') {
+            return null;
+        }
+
+        // Strip common wrappers.
+        $raw = preg_replace('/^```(?:json)?\s*/i', '', $raw) ?? $raw;
+        $raw = preg_replace('/\s*```\s*$/', '', $raw) ?? $raw;
+
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        // Try to extract first JSON object.
+        if (preg_match('/\{.*\}/s', $raw, $matches) === 1) {
+            $decoded = json_decode($matches[0], true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        return null;
+    }
+
+    private function validateWordPressNewsPayload(array $payload): array
+    {
+        $errors = [];
+
+        foreach (self::WP_JSON_KEYS as $key) {
+            if (!array_key_exists($key, $payload)) {
+                $errors[] = 'missing_' . $key;
+            }
+        }
+
+        // We intentionally do NOT enforce SEO lengths or strip/trim anything in PHP.
+        // Only the presence of the required keys is validated here.
+
+        return array_values(array_unique($errors));
     }
 
     /**
@@ -268,7 +423,7 @@ EXEMPLE VALIDE :
             . "Return only one word: YES or NO.\n\n"
             . $excerpt;
 
-        $response = mb_strtoupper(trim((string) $this->callOpenAI($prompt, 5)));
+        $response = mb_strtoupper(trim((string) $this->callOpenAI($prompt, 64)));
         if ($response === 'YES') {
             return true;
         }
@@ -282,14 +437,15 @@ EXEMPLE VALIDE :
 
     public function extractNewsSections(string $content): array
     {
-        $structuredContent = $this->prepareStructuredPromptHtml($content);
+        //$structuredContent = $this->prepareStructuredPromptHtml($content);
+        $structuredContent = $content;
         $structuredPlain = $this->prepareStructuredPromptText($content);
 
         if ($structuredContent === '') {
             return ['FR' => '', 'EN' => ''];
         }
 
-        $prompt = "You are extracting aviation news sections from a forwarded email.\n"
+        /*$prompt = "You are extracting aviation news sections from a forwarded email.\n"
             . "Return a strict JSON object with exactly two keys: FR and EN.\n"
             . "Each value must contain ONLY the relevant article section in that language, as HTML.\n"
             . "If a language is absent, return an empty string for that key.\n"
@@ -301,7 +457,8 @@ EXEMPLE VALIDE :
             . "- Do NOT add <html>, <head>, <body>, <style>, <script>, tables, or office markup.\n"
             . "- Do NOT translate. Do NOT summarize.\n"
             . "Return JSON only (double quotes, properly escaped).\n\n"
-            . mb_substr($structuredContent, 0, 12000);
+            . mb_substr($structuredContent, 0, 12000);*/
+        $prompt = "";
 
         $response = trim((string) $this->callOpenAI($prompt, 900));
         $decoded = json_decode($response, true);
@@ -1330,25 +1487,175 @@ EXEMPLE VALIDE :
     /**
      * Call OpenAI API
      */
-    private function callOpenAI(string $prompt, int $maxTokens = 500): ?string
+    private function callOpenAI(string $prompt, int $maxTokens = 500, float $temperature = 0.3): ?string
     {
-        try {
-            $response = $this->client->chat()->create([
-                'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
-                'messages' => [
-                    [
-                        'role' => 'user',
-                        'content' => $prompt
-                    ]
-                ],
-                'max_tokens' => $maxTokens,
-                'temperature' => 0.3
-            ]);
+        $model = (string) env('OPENAI_MODEL', 'gpt-5-mini');
+        $fallbackModel = trim((string) env('OPENAI_FALLBACK_MODEL', 'gpt-4o-mini'));
 
-            return trim($response->choices[0]->message->content);
-        } catch (\Exception $e) {
-            Log::error('OpenAI API error: ' . $e->getMessage());
-            return null;
+        $useFastFallbackForGpt5 = filter_var(env('OPENAI_GPT5_FAST_FALLBACK', true), FILTER_VALIDATE_BOOL);
+        if ($useFastFallbackForGpt5
+            && $fallbackModel !== ''
+            && strtolower(trim($fallbackModel)) !== strtolower(trim($model))
+            && str_starts_with(strtolower(trim($model)), 'gpt-5')
+        ) {
+            if (config('app.debug')) {
+                Log::warning('OpenAI fast fallback enabled for gpt-5', [
+                    'primary_model' => $model,
+                    'fallback_model' => $fallbackModel,
+                ]);
+            }
+            $model = $fallbackModel;
         }
+
+        // Reasoning-style models can consume output budget internally and return empty strings
+        // if max_completion_tokens is too small.
+        if ($this->shouldUseMaxCompletionTokens($model)) {
+            $maxTokens = max($maxTokens, (int) env('OPENAI_MIN_COMPLETION_TOKENS', 256));
+        }
+
+        $payload = $this->buildChatPayload($model, $prompt, $maxTokens, $temperature);
+
+        $attempts = 0;
+        while ($attempts < 2) {
+            $attempts++;
+            try {
+                if (config('app.debug')) {
+                    Log::debug('OpenAI request', [
+                        'model' => $model,
+                        'has_temperature' => array_key_exists('temperature', $payload),
+                        'uses_max_completion_tokens' => array_key_exists('max_completion_tokens', $payload),
+                        'max_tokens' => $maxTokens,
+                    ]);
+                }
+
+                $response = $this->client->chat()->create($payload);
+                $choice = $response->choices[0] ?? null;
+                $message = $choice?->message ?? null;
+                $content = $message?->content ?? null;
+
+                $contentText = '';
+                if (is_string($content)) {
+                    $contentText = trim($content);
+                } elseif (is_array($content)) {
+                    $parts = [];
+                    foreach ($content as $part) {
+                        if (is_string($part)) {
+                            $parts[] = $part;
+                            continue;
+                        }
+                        if (is_array($part) && isset($part['text']) && is_string($part['text'])) {
+                            $parts[] = $part['text'];
+                            continue;
+                        }
+                        if (is_object($part) && isset($part->text) && is_string($part->text)) {
+                            $parts[] = $part->text;
+                            continue;
+                        }
+                    }
+                    $contentText = trim(implode('', $parts));
+                }
+
+                if ($contentText === '' && config('app.debug')) {
+                    Log::debug('OpenAI empty content', [
+                        'model' => $model,
+                        'has_message' => $message !== null,
+                        'content_type' => gettype($content),
+                        'finish_reason' => is_object($choice) && isset($choice->finishReason) ? $choice->finishReason : null,
+                    ]);
+                }
+
+                if ($contentText !== '') {
+                    return $contentText;
+                }
+
+                // If the primary model returns empty output (seen with some models/SDK combos),
+                // fall back to a chat-stable model.
+                if (
+                    $fallbackModel !== ''
+                    && strtolower(trim($fallbackModel)) !== strtolower(trim($model))
+                    && $this->shouldUseMaxCompletionTokens($model)
+                ) {
+                    if (config('app.debug')) {
+                        Log::warning('OpenAI fallback model used', [
+                            'primary_model' => $model,
+                            'fallback_model' => $fallbackModel,
+                        ]);
+                    }
+
+                    $fallbackPayload = $this->buildChatPayload($fallbackModel, $prompt, $maxTokens, $temperature);
+                    $fallbackResponse = $this->client->chat()->create($fallbackPayload);
+                    $fallbackChoice = $fallbackResponse->choices[0] ?? null;
+                    $fallbackMessage = $fallbackChoice?->message ?? null;
+                    $fallbackContent = $fallbackMessage?->content ?? null;
+
+                    $fallbackText = is_string($fallbackContent) ? trim($fallbackContent) : '';
+                    return $fallbackText !== '' ? $fallbackText : null;
+                }
+
+                return null;
+            } catch (\Exception $e) {
+                $message = $e->getMessage();
+                Log::error('OpenAI API error: ' . $message);
+
+                // Retry once on transient/timeout-like failures.
+                if ($attempts < 2 && preg_match('/timeout|timed out|cURL error 28/i', $message) === 1) {
+                    continue;
+                }
+
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private function buildChatPayload(string $model, string $prompt, int $maxTokens, float $temperature): array
+    {
+        $payload = [
+            'model' => $model,
+            'messages' => [
+                [
+                    'role' => 'user',
+                    'content' => $prompt,
+                ],
+            ],
+        ];
+
+        // Some models only support the default temperature. For those, omit the parameter.
+        if (!$this->shouldOmitTemperature($model)) {
+            $payload['temperature'] = $temperature;
+        }
+
+        // Some newer models reject `max_tokens` and require `max_completion_tokens`.
+        if ($this->shouldUseMaxCompletionTokens($model)) {
+            $payload['max_completion_tokens'] = $maxTokens;
+        } else {
+            $cap = (int) env('OPENAI_MAX_TOKENS', 4096);
+            if ($cap > 0) {
+                $maxTokens = min($maxTokens, $cap);
+            }
+            $payload['max_tokens'] = $maxTokens;
+        }
+
+        return $payload;
+    }
+
+    private function shouldUseMaxCompletionTokens(string $model): bool
+    {
+        $model = strtolower(trim($model));
+        // Keep this intentionally simple and conservative.
+        return str_starts_with($model, 'gpt-5')
+            || str_starts_with($model, 'o1')
+            || str_starts_with($model, 'o3')
+            || str_starts_with($model, 'gpt-4.1');
+    }
+
+    private function shouldOmitTemperature(string $model): bool
+    {
+        $model = strtolower(trim($model));
+        return str_starts_with($model, 'gpt-5')
+            || str_starts_with($model, 'o1')
+            || str_starts_with($model, 'o3')
+            || str_starts_with($model, 'o4');
     }
 }

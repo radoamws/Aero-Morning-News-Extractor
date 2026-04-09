@@ -88,8 +88,14 @@ class NewsController extends Controller
             $this->ensureEmailProcessingServices();
 
             // Real mailbox processing can be slower on large multipart emails.
-            @ini_set('max_execution_time', '300');
-            @set_time_limit(300);
+            // Keep a reasonable cap for HTTP, but allow long runs for artisan.
+            if (app()->runningInConsole()) {
+                @ini_set('max_execution_time', '0');
+                @set_time_limit(0);
+            } else {
+                @ini_set('max_execution_time', '300');
+                @set_time_limit(300);
+            }
 
             $emails = $this->emailService->getUnreadEmails();
 
@@ -131,13 +137,20 @@ class NewsController extends Controller
 
             $this->sendProcessingSummaryEmail($summary);
 
-            return response()->json([
+            $response = [
                 'success' => true,
                 'message' => 'Email processing completed',
                 'processed' => $processedCount,
                 'failed' => $failedCount,
                 'skipped' => $skippedCount,
-            ]);
+
+            ];
+
+            if (config('app.debug')) {
+                $response['summary'] = $summary;
+            }
+
+            return response()->json($response);
         } catch (\Throwable $e) {
             Log::error('Error in email processing: ' . $e->getMessage());
             return response()->json([
@@ -173,6 +186,21 @@ class NewsController extends Controller
                 $existingLangs = News::where('email_message_id', $emailContent['message_id'])
                     ->pluck('lang')
                     ->toArray();
+            }
+
+            // If both languages already exist, skip early to avoid wasting OpenAI calls.
+            if (
+                !empty($emailContent['message_id'])
+                && in_array('FR', $existingLangs, true)
+                && in_array('EN', $existingLangs, true)
+            ) {
+                $summary['skipped'][] = [
+                    'subject' => $emailContent['subject'] ?? 'no-subject',
+                    'from' => $emailContent['from'] ?? '',
+                    'reason' => 'already_processed',
+                ];
+                $this->emailService->markAsRead($mail->id);
+                return self::EMAIL_RESULT_SKIPPED;
             }
 
             // Extract or download image
@@ -212,25 +240,8 @@ class NewsController extends Controller
             Log::info("Email subject: " . $emailContent['subject']);
             Log::info("Has attachment: " . ($hasAttachments ? 'yes' : 'no'));
 
-            $sections = $this->openaiService->extractNewsSections($normalizedBodyContent);
-            $frenchContent = trim((string) ($sections['FR'] ?? ''));
-            $englishContent = trim((string) ($sections['EN'] ?? ''));
-
-            if ($frenchContent === '' && $englishContent === '') {
-                $fallbackLanguages = $this->detectLanguage($languageDetectionText);
-                if (in_array('FR', $fallbackLanguages, true)) {
-                    $frenchContent = $this->extractContentForLanguage($normalizedBodyContent, 'FR');
-                }
-                if (in_array('EN', $fallbackLanguages, true)) {
-                    $englishContent = $this->extractContentForLanguage($normalizedBodyContent, 'EN');
-                }
-            }
-
             if (!$hasAttachments) {
-                $imageSelectionContent = trim($frenchContent . "\n\n" . $englishContent);
-                if ($imageSelectionContent === '') {
-                    $imageSelectionContent = $normalizedBodyContent;
-                }
+                $imageSelectionContent = $normalizedBodyContent;
 
                 $imageCandidates = $this->emailService->extractImageCandidatesFromHtml($imageSelectionContent);
                 $foundImageUrl = $this->openaiService->chooseRelevantImageUrl(
@@ -248,43 +259,43 @@ class NewsController extends Controller
 
             $createdAny = false;
 
-            if ($frenchContent !== '') {
+            // IMPORTANT: As requested, we pass the raw $emailContent at the end of the prompt.
+            // No PHP-side formatting/cleanup is applied to content fields.
+            $newsPayload = $this->openaiService->extractWordPressNewsJson($emailContent);
+
+            if (!is_array($newsPayload)) {
+                Log::warning('No structured JSON returned by WordPress prompt for email: ' . ($emailContent['message_id'] ?: 'no-message-id'));
+                $summary['failed'][] = [
+                    'subject' => $emailContent['subject'] ?? 'no-subject',
+                    'from' => $emailContent['from'] ?? '',
+                    'error' => 'OpenAI did not return a valid WordPress JSON payload (check OpenAI quota/billing and OPENAI_API_KEY)',
+                ];
+                return self::EMAIL_RESULT_FAILED;
+            }
+
+            if (($newsPayload['FR'] ?? '') !== '') {
                 if (in_array('FR', $existingLangs, true)) {
                     Log::info("French news already exists for email: " . $emailContent['message_id']);
                 } else {
-                    $frenchOriginalTitle = $this->openaiService->extractOriginalArticleTitle($frenchContent, 'FR', (string) $emailContent['subject']);
-                    if ($frenchOriginalTitle === '') {
-                        $frenchOriginalTitle = $this->extractOriginalArticleTitle($frenchContent, $emailContent['subject'], 'FR');
-                    }
-                    $frenchSource = $this->detectArticleSource($frenchContent, (string) ($emailContent['from'] ?? ''));
                     $createdAny = $this->processFrenchNews(
-                        $frenchContent,
-                        $emailContent['subject'],
-                        $emailContent['message_id'],
+                        $newsPayload,
+                        (string) ($emailContent['subject'] ?? ''),
+                        (string) ($emailContent['message_id'] ?? ''),
                         $imageUrl,
-                        $frenchOriginalTitle,
-                        $frenchSource,
                         $contentBrut
                     ) || $createdAny;
                 }
             }
 
-            if ($englishContent !== '') {
+            if (($newsPayload['EN'] ?? '') !== '') {
                 if (in_array('EN', $existingLangs, true)) {
                     Log::info("English news already exists for email: " . $emailContent['message_id']);
                 } else {
-                    $englishOriginalTitle = $this->openaiService->extractOriginalArticleTitle($englishContent, 'EN', (string) $emailContent['subject']);
-                    if ($englishOriginalTitle === '') {
-                        $englishOriginalTitle = $this->extractOriginalArticleTitle($englishContent, $emailContent['subject'], 'EN');
-                    }
-                    $englishSource = $this->detectArticleSource($englishContent, (string) ($emailContent['from'] ?? ''));
                     $createdAny = $this->processEnglishNews(
-                        $englishContent,
-                        $emailContent['subject'],
-                        $emailContent['message_id'],
+                        $newsPayload,
+                        (string) ($emailContent['subject'] ?? ''),
+                        (string) ($emailContent['message_id'] ?? ''),
                         $imageUrl,
-                        $englishOriginalTitle,
-                        $englishSource,
                         $contentBrut
                     ) || $createdAny;
                 }
@@ -304,7 +315,7 @@ class NewsController extends Controller
                 $summary['failed'][] = [
                     'subject' => $emailContent['subject'] ?? 'no-subject',
                     'from' => $emailContent['from'] ?? '',
-                    'error' => 'No news generated from extracted sections',
+                    'error' => 'No news generated from WordPress prompt payload',
                 ];
                 return self::EMAIL_RESULT_FAILED;
             }
@@ -421,150 +432,90 @@ class NewsController extends Controller
      * Process French news
      */
     private function processFrenchNews(
-        string $content,
+        array $newsPayload,
         string $subject,
         string $messageId,
         ?string $imageUrl,
-        string $originalTitle,
-        string $sourceHint,
         string $contentBrut
     ): bool
     {
-        try {
-            // Generate French metadata
-            $titlePayloadFr = $this->openaiService->generateFrenchTitlePayload($content, $originalTitle);
-            $titleFr = $titlePayloadFr['optimized'] ?? null;
-            $h2TitleFr = $titlePayloadFr['use_original_in_h2'] ?? false
-                ? ($titlePayloadFr['original'] ?? $originalTitle)
-                : ($titlePayloadFr['optimized'] ?? $originalTitle);
-
-            if (!$titleFr) {
-                $titleFr = $this->fallbackTitle($subject, $originalTitle, 'FR');
-                $h2TitleFr = mb_strlen($originalTitle) > 62 ? $originalTitle : $titleFr;
-                Log::warning("Failed to generate French title, using fallback title");
-            }
-
-            $contentFr = $this->openaiService->generateFrenchContent($content, $titleFr, $originalTitle);
-            if (!$contentFr) {
-                $contentFr = $this->fallbackContent($content, $h2TitleFr, 'FR');
-                Log::warning("Failed to generate French content, using fallback content");
-            }
-
-            $contentFr = $this->finalizeArticleHtml($contentFr, $content, $h2TitleFr, $sourceHint, 'FR');
-
-            $metaDescFr = $this->openaiService->generateFrenchMetaDescription($contentFr);
-            if (!$metaDescFr) {
-                $metaDescFr = $this->buildMetaDescriptionFromArticle($contentFr, 'FR');
-            }
-
-            $keyPhraseFr = $this->openaiService->generateFrenchKeyphrase($contentFr);
-            if (!$keyPhraseFr) {
-                $keyPhraseFr = $this->buildFocusKeyphraseFromTitle($titleFr, 'FR');
-            }
-
-            // Get categories and tags
-            $categoriesFr = $this->wordpressService->getCategoriesForClassification('FR');
-            $categoriesString = $this->openaiService->classifyCategories($contentFr, $categoriesFr, 'FR');
-
-            $tagsFr = $this->wordpressService->getTagsForClassification('FR');
-            $tagsString = $this->openaiService->classifyTags($contentFr, $tagsFr, 'FR');
-            $tagsString = $this->reorderSelectedTags($tagsString, $tagsFr, $categoriesFr, $categoriesString, $contentFr, $titleFr);
-
-            // Save to database
-            News::create([
-                'lang' => 'FR',
-                'title' => trim(strip_tags($titleFr)),
-                'content' => $contentFr,
-                'content_brut' => $contentBrut,
-                'metadescription' => $metaDescFr ?? '',
-                'focuskeyphrase' => $keyPhraseFr ?? '',
-                'categories' => $categoriesString ?? '',
-                'tags' => $tagsString ?? '',
-                'image_url' => $imageUrl,
-                'status' => News::STATUS_PENDING,
-                'email_message_id' => $messageId
-            ]);
-
-            Log::info("French news created successfully for email: $messageId");
-            return true;
-        } catch (\Exception $e) {
-            Log::error("Error processing French news: " . $e->getMessage());
-            return false;
-        }
+        return $this->processNewsFromWordPressPromptPayload('FR', $newsPayload, $subject, $messageId, $imageUrl, $contentBrut);
     }
 
     /**
      * Process English news
      */
     private function processEnglishNews(
-        string $content,
+        array $newsPayload,
         string $subject,
         string $messageId,
         ?string $imageUrl,
-        string $originalTitle,
-        string $sourceHint,
         string $contentBrut
     ): bool
     {
+        return $this->processNewsFromWordPressPromptPayload('EN', $newsPayload, $subject, $messageId, $imageUrl, $contentBrut);
+    }
+
+    private function processNewsFromWordPressPromptPayload(
+        string $lang,
+        array $newsPayload,
+        string $subject,
+        string $messageId,
+        ?string $imageUrl,
+        string $contentBrut
+    ): bool {
         try {
-            // Generate English metadata
-            $titlePayloadEn = $this->openaiService->generateEnglishTitlePayload($content, $originalTitle);
-            $titleEn = $titlePayloadEn['optimized'] ?? null;
-            $h2TitleEn = $titlePayloadEn['use_original_in_h2'] ?? false
-                ? ($titlePayloadEn['original'] ?? $originalTitle)
-                : ($titlePayloadEn['optimized'] ?? $originalTitle);
+            $titleKey = $lang === 'FR' ? 'shorttitleFR' : 'shorttitleEN';
+            $fallbackTitleKey = $lang === 'FR' ? 'titleFR' : 'titleEN';
+            $contentKey = $lang;
+            $metaKey = $lang === 'FR' ? 'metadescriptionFR' : 'metadescriptionEN';
+            $focusKey = $lang === 'FR' ? 'focuskeyphraseFR' : 'focuskeyphraseEN';
 
-            if (!$titleEn) {
-                $titleEn = $this->fallbackTitle($subject, $originalTitle, 'EN');
-                $h2TitleEn = mb_strlen($originalTitle) > 62 ? $originalTitle : $titleEn;
-                Log::warning("Failed to generate English title, using fallback title");
+            // IMPORTANT: no PHP-side cleanup/formatting; payload is assumed conform.
+            $title = is_string($newsPayload[$titleKey] ?? null) ? $newsPayload[$titleKey] : '';
+            if ($title === '') {
+                $title = is_string($newsPayload[$fallbackTitleKey] ?? null) ? $newsPayload[$fallbackTitleKey] : '';
+            }
+            if ($title === '') {
+                // No rewriting/cleanup in PHP; keep the original email subject as-is.
+                $title = $subject;
             }
 
-            $contentEn = $this->openaiService->generateEnglishContent($content, $titleEn, $originalTitle);
-            if (!$contentEn) {
-                $contentEn = $this->fallbackContent($content, $h2TitleEn, 'EN');
-                Log::warning("Failed to generate English content, using fallback content");
+            $content = is_string($newsPayload[$contentKey] ?? null) ? $newsPayload[$contentKey] : '';
+            if ($content === '') {
+                Log::warning("Empty {$lang} content from WordPress prompt for email: {$messageId}");
+                return false;
             }
 
-            $contentEn = $this->finalizeArticleHtml($contentEn, $content, $h2TitleEn, $sourceHint, 'EN');
+            $meta = is_string($newsPayload[$metaKey] ?? null) ? $newsPayload[$metaKey] : '';
+            $focus = is_string($newsPayload[$focusKey] ?? null) ? $newsPayload[$focusKey] : '';
 
-            $metaDescEn = $this->openaiService->generateEnglishMetaDescription($contentEn);
-            if (!$metaDescEn) {
-                $metaDescEn = $this->buildMetaDescriptionFromArticle($contentEn, 'EN');
-            }
+            // Categories & tags remain computed from the final HTML content.
+            $categories = $this->wordpressService->getCategoriesForClassification($lang);
+            $categoriesString = $this->openaiService->classifyCategories($content, $categories, $lang);
 
-            $keyPhraseEn = $this->openaiService->generateEnglishKeyphrase($contentEn);
-            if (!$keyPhraseEn) {
-                $keyPhraseEn = $this->buildFocusKeyphraseFromTitle($titleEn, 'EN');
-            }
+            $tags = $this->wordpressService->getTagsForClassification($lang);
+            $tagsString = $this->openaiService->classifyTags($content, $tags, $lang);
+            $tagsString = $this->reorderSelectedTags($tagsString, $tags, $categories, $categoriesString, $content, $title);
 
-            // Get categories and tags
-            $categoriesEn = $this->wordpressService->getCategoriesForClassification('EN');
-            $categoriesString = $this->openaiService->classifyCategories($contentEn, $categoriesEn, 'EN');
-
-            $tagsEn = $this->wordpressService->getTagsForClassification('EN');
-            $tagsString = $this->openaiService->classifyTags($contentEn, $tagsEn, 'EN');
-            $tagsString = $this->reorderSelectedTags($tagsString, $tagsEn, $categoriesEn, $categoriesString, $contentEn, $titleEn);
-
-            // Save to database
             News::create([
-                'lang' => 'EN',
-                'title' => trim(strip_tags($titleEn)),
-                'content' => $contentEn,
+                'lang' => $lang,
+                'title' => $title,
+                'content' => $content,
                 'content_brut' => $contentBrut,
-                'metadescription' => $metaDescEn ?? '',
-                'focuskeyphrase' => $keyPhraseEn ?? '',
+                'metadescription' => $meta,
+                'focuskeyphrase' => $focus,
                 'categories' => $categoriesString ?? '',
                 'tags' => $tagsString ?? '',
                 'image_url' => $imageUrl,
                 'status' => News::STATUS_PENDING,
-                'email_message_id' => $messageId
+                'email_message_id' => $messageId,
             ]);
 
-            Log::info("English news created successfully for email: $messageId");
+            Log::info("{$lang} news created successfully for email: {$messageId}");
             return true;
-        } catch (\Exception $e) {
-            Log::error("Error processing English news: " . $e->getMessage());
+        } catch (\Throwable $e) {
+            Log::error("Error processing {$lang} news from WordPress payload: " . $e->getMessage());
             return false;
         }
     }

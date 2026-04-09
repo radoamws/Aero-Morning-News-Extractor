@@ -12,6 +12,10 @@ class ProcessEmailsCommand extends Command
 
     public function handle(): int
     {
+        // XAMPP/CLI can still enforce max_execution_time; this job may take longer.
+        @ini_set('max_execution_time', '0');
+        @set_time_limit(0);
+
         $this->info('Starting email processing...');
 
         try {
