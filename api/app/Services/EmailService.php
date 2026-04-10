@@ -4,11 +4,13 @@ namespace App\Services;
 
 use PhpImap\Mailbox;
 use PhpImap\IncomingMail;
+use PhpImap\Exceptions\ConnectionException;
 use Illuminate\Support\Facades\Log;
 
 class EmailService
 {
     private ?Mailbox $mailbox = null;
+    private ?string $lastMailboxInitError = null;
 
     public function __construct()
     {
@@ -21,6 +23,8 @@ class EmailService
     private function initializeMailbox(): void
     {
         try {
+            $this->lastMailboxInitError = null;
+
             if (!extension_loaded('imap')) {
                 throw new \RuntimeException('PHP IMAP extension is not enabled.');
             }
@@ -29,17 +33,57 @@ class EmailService
                 throw new \RuntimeException('IMAP configuration is incomplete. Check IMAP_HOST, IMAP_USERNAME and IMAP_PASSWORD.');
             }
 
-            $imapPath = $this->buildMailboxPath();
+            $username = (string) env('IMAP_USERNAME');
+            $password = (string) env('IMAP_PASSWORD');
+            $attachmentsDir = storage_path('app/attachments');
 
-            $this->mailbox = new Mailbox(
-                $imapPath,
-                env('IMAP_USERNAME'),
-                env('IMAP_PASSWORD'),
-                storage_path('app/attachments'),
-                'UTF-8'
-            );
+            $pathsToTry = $this->buildMailboxPathsToTry();
+            $connectionErrors = [];
+
+            foreach ($pathsToTry as $imapPath) {
+                try {
+                    $mailbox = new Mailbox(
+                        $imapPath,
+                        $username,
+                        $password,
+                        $attachmentsDir,
+                        'UTF-8'
+                    );
+
+                    // Prevent long hangs during TLS negotiation / broken servers.
+                    $timeoutSec = (int) env('IMAP_TIMEOUT_SEC', 15);
+                    if ($timeoutSec > 0) {
+                        $mailbox->setTimeouts($timeoutSec);
+                    }
+
+                    // Keep retries small; we already have fallback paths.
+                    $mailbox->setConnectionRetry((int) env('IMAP_CONNECTION_RETRY', 1));
+                    $mailbox->setConnectionRetryDelay((int) env('IMAP_CONNECTION_RETRY_DELAY_MS', 0));
+
+                    // Proactively open a stream so TLS/SSL failures are caught here.
+                    $mailbox->getImapStream(true);
+
+                    $this->mailbox = $mailbox;
+                    Log::info('IMAP connection established.', [
+                        'imap_path' => $this->redactMailboxPath($imapPath),
+                    ]);
+                    return;
+                } catch (\Throwable $e) {
+                    $msg = $this->normalizeImapExceptionMessage($e);
+                    $connectionErrors[] = $msg;
+                    Log::warning('IMAP connection attempt failed.', [
+                        'imap_path' => $this->redactMailboxPath($imapPath),
+                        'error' => $msg,
+                    ]);
+                }
+            }
+
+            $summary = $connectionErrors ? implode(' | ', array_unique($connectionErrors)) : 'Unknown IMAP error';
+            throw new \RuntimeException('IMAP connection failed. ' . $summary);
         } catch (\Throwable $e) {
-            Log::error('IMAP connection error: ' . $e->getMessage());
+            $msg = $this->normalizeImapExceptionMessage($e);
+            $this->lastMailboxInitError = $msg;
+            Log::error('IMAP connection error: ' . $msg);
             $this->mailbox = null;
         }
     }
@@ -71,6 +115,63 @@ class EmailService
         $port = (string) env('IMAP_PORT', '993');
         $encryption = strtolower((string) env('IMAP_ENCRYPTION', 'ssl'));
 
+        $validateCert = $this->envBool('IMAP_VALIDATE_CERT', true);
+
+        return $this->buildMailboxPathFor($host, $port, $encryption, $validateCert, (string) env('IMAP_FOLDER', 'INBOX'));
+    }
+
+    private function buildMailboxPathsToTry(): array
+    {
+        $host = (string) env('IMAP_HOST');
+        $port = (string) env('IMAP_PORT', '993');
+        $encryption = strtolower((string) env('IMAP_ENCRYPTION', 'ssl'));
+        $folder = (string) env('IMAP_FOLDER', 'INBOX');
+
+        $validateCert = $this->envBool('IMAP_VALIDATE_CERT', true);
+
+        $paths = [];
+        $paths[] = $this->buildMailboxPathFor($host, $port, $encryption, $validateCert, $folder);
+
+        // Common fix on hosts with bad/self-signed certs.
+        if ($validateCert) {
+            $paths[] = $this->buildMailboxPathFor($host, $port, $encryption, false, $folder);
+        }
+
+        // Common mismatch: server expects STARTTLS on 143 instead of implicit SSL on 993.
+        if ($encryption === 'ssl' && (string) $port === '993') {
+            $paths[] = $this->buildMailboxPathFor($host, '143', 'tls', $validateCert, $folder);
+            if ($validateCert) {
+                $paths[] = $this->buildMailboxPathFor($host, '143', 'tls', false, $folder);
+            }
+        }
+
+        // Opposite mismatch: configured TLS on 143 but server is implicit SSL on 993.
+        if ($encryption === 'tls' && (string) $port === '143') {
+            $paths[] = $this->buildMailboxPathFor($host, '993', 'ssl', $validateCert, $folder);
+            if ($validateCert) {
+                $paths[] = $this->buildMailboxPathFor($host, '993', 'ssl', false, $folder);
+            }
+        }
+
+        // Last resort (only if explicitly allowed): try plaintext.
+        if ($this->envBool('IMAP_ALLOW_NOTLS_FALLBACK', false)) {
+            $paths[] = $this->buildMailboxPathFor($host, $port, 'notls', $validateCert, $folder);
+            $paths[] = $this->buildMailboxPathFor($host, '143', 'notls', $validateCert, $folder);
+        }
+
+        // Deduplicate while keeping order.
+        $unique = [];
+        foreach ($paths as $path) {
+            if (!in_array($path, $unique, true)) {
+                $unique[] = $path;
+            }
+        }
+
+        return $unique;
+    }
+
+    private function buildMailboxPathFor(string $host, string $port, string $encryption, bool $validateCert, string $folder): string
+    {
         $flags = ['/imap'];
 
         if ($encryption === 'ssl') {
@@ -81,7 +182,61 @@ class EmailService
             $flags[] = '/notls';
         }
 
-        return '{' . $host . ':' . $port . implode('', $flags) . '}INBOX';
+        if (!$validateCert) {
+            $flags[] = '/novalidate-cert';
+        }
+
+        $folder = $folder !== '' ? $folder : 'INBOX';
+        return '{' . $host . ':' . $port . implode('', $flags) . '}' . $folder;
+    }
+
+    private function envBool(string $key, bool $default): bool
+    {
+        $raw = env($key);
+        if ($raw === null) {
+            return $default;
+        }
+
+        if (is_bool($raw)) {
+            return $raw;
+        }
+
+        $raw = strtolower(trim((string) $raw));
+        if ($raw === '') {
+            return $default;
+        }
+
+        return in_array($raw, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    private function redactMailboxPath(string $imapPath): string
+    {
+        // Keep host/port/flags for diagnostics, but avoid logging folder names with sensitive structure.
+        if (preg_match('/^(\{[^}]+\})/i', $imapPath, $m) === 1) {
+            return $m[1] . '<folder>';
+        }
+        return '<imap_path>';
+    }
+
+    private function normalizeImapExceptionMessage(\Throwable $e): string
+    {
+        if ($e instanceof ConnectionException) {
+            $first = $e->getErrors('first');
+            return is_string($first) ? $first : (string) $e->getMessage();
+        }
+
+        $msg = (string) $e->getMessage();
+        $msgTrim = trim($msg);
+
+        // Some upstream errors are JSON arrays encoded as a string.
+        if ($msgTrim !== '' && str_starts_with($msgTrim, '[')) {
+            $decoded = json_decode($msgTrim, true);
+            if (is_array($decoded) && isset($decoded[0]) && is_string($decoded[0])) {
+                return $decoded[0];
+            }
+        }
+
+        return $msgTrim !== '' ? $msgTrim : get_class($e);
     }
 
     /**
@@ -100,7 +255,8 @@ class EmailService
             }
 
             if (!$this->mailbox) {
-                throw new \RuntimeException('IMAP mailbox is unavailable. Check IMAP configuration in .env.');
+                $suffix = $this->lastMailboxInitError ? (' ' . $this->lastMailboxInitError) : '';
+                throw new \RuntimeException('IMAP mailbox is unavailable. Check IMAP configuration in .env.' . $suffix);
             }
 
             $criteria = strtoupper((string) env('IMAP_SEARCH_CRITERIA', 'UNSEEN'));
@@ -113,8 +269,9 @@ class EmailService
 
             return $mailsIds;
         } catch (\Throwable $e) {
-            Log::error('Error fetching unread emails: ' . $e->getMessage());
-            throw new \RuntimeException($e->getMessage(), 0, $e);
+            $msg = $this->normalizeImapExceptionMessage($e);
+            Log::error('Error fetching unread emails: ' . $msg);
+            throw new \RuntimeException($msg, 0, $e);
         }
     }
 
@@ -133,14 +290,16 @@ class EmailService
             }
 
             if (!$this->mailbox) {
-                throw new \RuntimeException('IMAP mailbox is unavailable.');
+                $suffix = $this->lastMailboxInitError ? (' ' . $this->lastMailboxInitError) : '';
+                throw new \RuntimeException('IMAP mailbox is unavailable.' . $suffix);
             }
 
             // IMPORTANT: do not mark emails as seen just by reading them.
             return $this->mailbox->getMail($mailId, false);
         } catch (\Throwable $e) {
-            Log::warning("Error fetching email ID {$mailId}: " . $e->getMessage());
-            throw new \RuntimeException($e->getMessage(), 0, $e);
+            $msg = $this->normalizeImapExceptionMessage($e);
+            Log::warning("Error fetching email ID {$mailId}: " . $msg);
+            throw new \RuntimeException($msg, 0, $e);
         }
     }
 
