@@ -215,10 +215,12 @@ class WordPressPostingController extends Controller
      * Uses the Application Password stored in .env — no credentials in the request.
      * Sends an email summary at the end.
      */
-    public function publishPendingNews(): JsonResponse
+    public function publishPendingNews(Request $request): JsonResponse
     {
         $processLog = null;
         $processLogService = app(ProcessLogService::class);
+
+        $debug = $request->boolean('debug');
 
         try {
             @ini_set('max_execution_time', '300');
@@ -266,23 +268,31 @@ class WordPressPostingController extends Controller
                         $news->status = News::STATUS_SYNCED;
                         $news->save();
 
-                        $results['success'][] = [
+                        $successItem = [
                             'id'         => $news->id,
                             'lang'       => $news->lang,
                             'title'      => $news->title,
                             'wp_post_id' => $result['wp_post_id'],
                         ];
+                        if ($debug) {
+                            $successItem['debug'] = $result['details'] ?? null;
+                        }
+                        $results['success'][] = $successItem;
                     } else {
                         // Revert to pending so it can be retried later.
                         $news->status = News::STATUS_PENDING;
                         $news->save();
 
-                        $results['failed'][] = [
+                        $failedItem = [
                             'id'    => $news->id,
                             'lang'  => $news->lang,
                             'title' => $news->title,
                             'error' => $result['error'] ?? 'Unknown error',
                         ];
+                        if ($debug) {
+                            $failedItem['debug'] = $result['details'] ?? null;
+                        }
+                        $results['failed'][] = $failedItem;
                     }
                 } catch (\Throwable $e) {
                     Log::error("Error publishing news #{$news->id}: " . $e->getMessage());
@@ -295,12 +305,21 @@ class WordPressPostingController extends Controller
                         // ignore secondary persistence failures
                     }
 
-                    $results['failed'][] = [
+                    $failedItem = [
                         'id'    => $news->id,
                         'lang'  => $news->lang,
                         'title' => $news->title,
                         'error' => $e->getMessage(),
                     ];
+                    if ($debug) {
+                        $failedItem['debug'] = [
+                            'exception' => [
+                                'class' => get_class($e),
+                                'message' => $e->getMessage(),
+                            ],
+                        ];
+                    }
+                    $results['failed'][] = $failedItem;
                 }
             }
 

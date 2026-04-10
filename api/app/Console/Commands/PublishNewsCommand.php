@@ -11,12 +11,14 @@ use Illuminate\Support\Facades\Mail;
 
 class PublishNewsCommand extends Command
 {
-    protected $signature   = 'news:publish';
+    protected $signature   = 'news:publish {--debug : Print per-step WordPress API diagnostics (HTTP status + response excerpt)}';
     protected $description = 'Publish all pending (status=0) news to WordPress and send an email summary';
 
     public function handle(): int
     {
         $this->info('Starting WordPress publishing...');
+
+        $debug = (bool) $this->option('debug');
 
         $processLogService = app(ProcessLogService::class);
         $processLog = $processLogService->startRun('publish_pending', [
@@ -63,6 +65,10 @@ class PublishNewsCommand extends Command
             try {
                 $service = new WordPressPostingService($news->lang);
                 $result  = $service->publishToWordPress($news);
+
+                if ($debug && isset($result['details']) && is_array($result['details'])) {
+                    $this->printWpDebugDetails($result['details']);
+                }
 
                 if ($result['success']) {
                     $news->status = News::STATUS_SYNCED;
@@ -136,6 +142,78 @@ class PublishNewsCommand extends Command
             ]);
             return Command::FAILURE;
         }
+    }
+
+    private function printWpDebugDetails(array $details): void
+    {
+        $wpUrl = $details['wp_url'] ?? null;
+        $hasToken = (bool) ($details['has_auth_token'] ?? false);
+        $tokenLen = $details['auth_token_length'] ?? null;
+
+        $this->line('  Debug — ' .
+            'wp_url=' . ($wpUrl ?: '<missing>') .
+            ' | auth_token=' . ($hasToken ? 'present' : 'missing') .
+            (is_int($tokenLen) ? " | token_len={$tokenLen}" : '')
+        );
+
+        $steps = $details['steps'] ?? [];
+        if (!is_array($steps) || empty($steps)) {
+            return;
+        }
+
+        foreach (['media_upload', 'post_create', 'yoast_meta'] as $stepName) {
+            if (!array_key_exists($stepName, $steps)) {
+                continue;
+            }
+
+            $step = $steps[$stepName];
+            if (!is_array($step)) {
+                continue;
+            }
+
+            $attempted = (bool) ($step['attempted'] ?? true);
+            $status = $step['http_status'] ?? null;
+            $excerpt = $this->flattenExcerpt($step['response_excerpt'] ?? null);
+
+            $line = "    - {$stepName}: " . ($attempted ? 'attempted' : 'skipped');
+            if ($status !== null) {
+                $line .= " | HTTP {$status}";
+            }
+            $this->line($line);
+
+            if (is_string($excerpt) && $excerpt !== '') {
+                $this->line('        response: ' . $excerpt);
+            }
+
+            if (isset($step['exception']) && is_array($step['exception'])) {
+                $exClass = $step['exception']['class'] ?? 'Exception';
+                $exMsg = $step['exception']['message'] ?? '';
+                $this->line("        exception: {$exClass}: {$exMsg}");
+            }
+            if (isset($step['error']) && is_string($step['error'])) {
+                $this->line('        error: ' . $step['error']);
+            }
+        }
+
+        if (isset($details['exception']) && is_array($details['exception'])) {
+            $exClass = $details['exception']['class'] ?? 'Exception';
+            $exMsg = $details['exception']['message'] ?? '';
+            $this->line("    - exception: {$exClass}: {$exMsg}");
+        }
+    }
+
+    private function flattenExcerpt(mixed $excerpt): ?string
+    {
+        if (!is_string($excerpt)) {
+            return null;
+        }
+        $excerpt = trim($excerpt);
+        if ($excerpt === '') {
+            return null;
+        }
+        // Keep console output readable.
+        $excerpt = str_replace(["\r\n", "\n", "\r", "\t"], [' ', ' ', ' ', ' '], $excerpt);
+        return $excerpt;
     }
 
     // -------------------------------------------------------------------------

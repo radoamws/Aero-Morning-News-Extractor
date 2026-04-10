@@ -35,15 +35,33 @@ class WordPressPostingService
      *   2. Create the WP post (JSON) with featured_media, categories, tags
      *   3. PATCH Yoast SEO meta (_yoast_wpseo_metadesc, _yoast_wpseo_focuskw)
      *
-     * Returns ['success' => bool, 'wp_post_id' => int|null, 'error' => string|null]
+     * Returns ['success' => bool, 'wp_post_id' => int|null, 'error' => string|null, 'details' => array]
      */
     public function publishToWordPress(News $news): array
     {
+        $details = [
+            'wp_url' => $this->wpUrl,
+            'lang' => $news->lang,
+            'has_auth_token' => $this->authToken !== '',
+            'auth_token_length' => strlen($this->authToken),
+            'steps' => [],
+        ];
+
         try {
             // Step 1 — upload featured image
             $imageId = null;
             if (!empty($news->image_url)) {
-                $imageId = $this->uploadImageMultipart($news->image_url);
+                $upload = $this->uploadImageMultipartDetailed($news->image_url);
+                $imageId = $upload['media_id'];
+                $details['steps']['media_upload'] = $upload;
+            } else {
+                $details['steps']['media_upload'] = [
+                    'attempted' => false,
+                    'media_id' => null,
+                    'http_status' => null,
+                    'response_excerpt' => null,
+                    'note' => 'No image_url on news',
+                ];
             }
 
             // Step 2 — create post
@@ -73,12 +91,19 @@ class WordPressPostingService
                 ->timeout(30)
                 ->post("{$this->wpUrl}/wp-json/wp/v2/posts", $postData);
 
+            $details['steps']['post_create'] = [
+                'attempted' => true,
+                'http_status' => $response->status(),
+                'response_excerpt' => $this->excerptWpResponse($response->body()),
+            ];
+
             if (!$response->successful()) {
                 Log::error("WP post creation failed [{$response->status()}]: " . $response->body());
                 return [
                     'success'    => false,
                     'wp_post_id' => null,
                     'error'      => "Post creation HTTP {$response->status()}",
+                    'details'    => $details,
                 ];
             }
 
@@ -86,13 +111,17 @@ class WordPressPostingService
             Log::info("News #{$news->id} published to WordPress — WP post ID: {$wpPostId}");
 
             // Step 3 — update Yoast SEO meta
-            $this->updateYoastMeta($wpPostId, $news);
+            $details['steps']['yoast_meta'] = $this->updateYoastMetaDetailed($wpPostId, $news);
 
-            return ['success' => true, 'wp_post_id' => $wpPostId, 'error' => null];
+            return ['success' => true, 'wp_post_id' => $wpPostId, 'error' => null, 'details' => $details];
 
         } catch (\Throwable $e) {
             Log::error("Error publishing news #{$news->id} to WordPress: " . $e->getMessage());
-            return ['success' => false, 'wp_post_id' => null, 'error' => $e->getMessage()];
+            $details['exception'] = [
+                'message' => $e->getMessage(),
+                'class' => get_class($e),
+            ];
+            return ['success' => false, 'wp_post_id' => null, 'error' => $e->getMessage(), 'details' => $details];
         }
     }
 
@@ -100,7 +129,7 @@ class WordPressPostingService
      * Upload the news image to the WordPress media library using
      * multipart/form-data with field key "file".
      */
-    private function uploadImageMultipart(string $imageUrl): ?int
+    private function uploadImageMultipartDetailed(string $imageUrl): array
     {
         try {
             // Resolve the local file path.
@@ -111,7 +140,14 @@ class WordPressPostingService
 
             if (!file_exists($filePath)) {
                 Log::warning("Image not found for WP upload: {$filePath}");
-                return null;
+                return [
+                    'attempted' => true,
+                    'media_id' => null,
+                    'http_status' => null,
+                    'response_excerpt' => null,
+                    'error' => 'image_not_found',
+                    'file_path' => $filePath,
+                ];
             }
 
             $fileName    = basename($filePath);
@@ -129,22 +165,41 @@ class WordPressPostingService
             if ($response->successful()) {
                 $mediaId = (int) $response->json('id');
                 Log::info("Image uploaded to WP media library — ID: {$mediaId}");
-                return $mediaId;
+                return [
+                    'attempted' => true,
+                    'media_id' => $mediaId,
+                    'http_status' => $response->status(),
+                    'response_excerpt' => $this->excerptWpResponse($response->body()),
+                ];
             }
 
             Log::error("WP media upload failed [{$response->status()}]: " . $response->body());
-            return null;
+            return [
+                'attempted' => true,
+                'media_id' => null,
+                'http_status' => $response->status(),
+                'response_excerpt' => $this->excerptWpResponse($response->body()),
+            ];
 
         } catch (\Throwable $e) {
             Log::error("Error uploading image to WordPress: " . $e->getMessage());
-            return null;
+            return [
+                'attempted' => true,
+                'media_id' => null,
+                'http_status' => null,
+                'response_excerpt' => null,
+                'exception' => [
+                    'message' => $e->getMessage(),
+                    'class' => get_class($e),
+                ],
+            ];
         }
     }
 
     /**
      * Update Yoast SEO meta on an existing WordPress post.
      */
-    private function updateYoastMeta(int $wpPostId, News $news): void
+    private function updateYoastMetaDetailed(int $wpPostId, News $news): array
     {
         try {
             $response = Http::withHeaders([
@@ -161,12 +216,47 @@ class WordPressPostingService
 
             if (!$response->successful()) {
                 Log::warning("Yoast meta update failed for WP post {$wpPostId} [{$response->status()}]");
-            } else {
-                Log::info("Yoast meta updated for WP post {$wpPostId}");
+                return [
+                    'attempted' => true,
+                    'http_status' => $response->status(),
+                    'response_excerpt' => $this->excerptWpResponse($response->body()),
+                ];
             }
+
+            Log::info("Yoast meta updated for WP post {$wpPostId}");
+            return [
+                'attempted' => true,
+                'http_status' => $response->status(),
+                'response_excerpt' => $this->excerptWpResponse($response->body()),
+            ];
         } catch (\Throwable $e) {
             Log::warning("Error updating Yoast meta for WP post {$wpPostId}: " . $e->getMessage());
+            return [
+                'attempted' => true,
+                'http_status' => null,
+                'response_excerpt' => null,
+                'exception' => [
+                    'message' => $e->getMessage(),
+                    'class' => get_class($e),
+                ],
+            ];
         }
+    }
+
+    private function excerptWpResponse(?string $body): ?string
+    {
+        if (!is_string($body)) {
+            return null;
+        }
+
+        $body = trim($body);
+        if ($body === '') {
+            return null;
+        }
+
+        // Avoid huge logs; keep the beginning which usually contains WP error code/message.
+        $max = 1200;
+        return mb_strlen($body) > $max ? (mb_substr($body, 0, $max) . '...<truncated>') : $body;
     }
 
     // -------------------------------------------------------------------------
