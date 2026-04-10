@@ -6,6 +6,14 @@ use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
 use Intervention\Image\ImageManager;
 use Intervention\Image\Drivers\Gd\Driver;
+use Intervention\Image\Encoders\AvifEncoder;
+use Intervention\Image\Encoders\BmpEncoder;
+use Intervention\Image\Encoders\GifEncoder;
+use Intervention\Image\Encoders\JpegEncoder;
+use Intervention\Image\Encoders\PngEncoder;
+use Intervention\Image\Encoders\WebpEncoder;
+use Intervention\Image\Interfaces\EncodedImageInterface;
+use Intervention\Image\Interfaces\ImageInterface;
 
 class ImageService
 {
@@ -84,17 +92,27 @@ class ImageService
             // Get original dimensions
             $origWidth = $image->width();
             $origHeight = $image->height();
+
+            if ($origWidth <= 0 || $origHeight <= 0) {
+                throw new \RuntimeException('Invalid image dimensions');
+            }
             
             // Create background canvas
             $canvas = $this->imageManager->create($this->maxWidth, $this->maxHeight);
-            $hexColor = ltrim($this->backgroundColor, '#');
-            $canvas->fill($hexColor);
+            $color = trim($this->backgroundColor);
+            if ($color !== '' && $color[0] !== '#') {
+                $color = '#' . $color;
+            }
+            $canvas->fill($color !== '' ? $color : '#005A8C');
 
             // Calculate scaling to fit image in canvas
             $scale = min(
                 $this->maxWidth / $origWidth,
                 $this->maxHeight / $origHeight
             );
+
+            // Do not upscale small images.
+            $scale = min(1, $scale);
 
             $newWidth = (int) ($origWidth * $scale);
             $newHeight = (int) ($origHeight * $scale);
@@ -117,8 +135,9 @@ class ImageService
             $storagePath = storage_path("app/public/images/{$filename}");
             @mkdir(dirname($storagePath), 0755, true);
 
-            // Save image
-            $canvas->save($storagePath, $this->quality);
+            // Save image (Intervention Image v3 encodes first)
+            $encoded = $this->encodeForStorage($canvas, $this->format, $this->quality);
+            $encoded->save($storagePath);
 
             // Check file size
             $fileSize = filesize($storagePath);
@@ -126,7 +145,8 @@ class ImageService
                 Log::warning("Image size exceeds limit: $fileSize > {$this->maxSize}");
                 
                 // Reduce quality and try again
-                $canvas->save($storagePath, 60);
+                $encoded = $this->encodeForStorage($canvas, $this->format, 60);
+                $encoded->save($storagePath);
                 $fileSize = filesize($storagePath);
                 
                 if ($fileSize > $this->maxSize) {
@@ -140,6 +160,22 @@ class ImageService
             Log::error("Error in image processing: " . $e->getMessage());
             return $this->storeOriginalImage($filePath, $newsTitle);
         }
+    }
+
+    private function encodeForStorage(ImageInterface $image, string $format, int $quality): EncodedImageInterface
+    {
+        $ext = strtolower(trim($format));
+        $ext = ltrim($ext, '.');
+
+        return match ($ext) {
+            'jpg', 'jpeg' => $image->encode(new JpegEncoder($quality)),
+            'webp' => $image->encode(new WebpEncoder($quality)),
+            'png' => $image->encode(new PngEncoder()),
+            'gif' => $image->encode(new GifEncoder()),
+            'bmp' => $image->encode(new BmpEncoder()),
+            'avif' => $image->encode(new AvifEncoder($quality)),
+            default => $image->encode(new JpegEncoder($quality)),
+        };
     }
 
     private function storeOriginalImage(string $filePath, string $newsTitle): ?string
