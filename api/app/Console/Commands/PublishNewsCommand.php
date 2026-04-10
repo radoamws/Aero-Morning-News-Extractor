@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\News;
+use App\Services\ProcessLogService;
 use App\Services\WordPressPostingService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -17,13 +18,24 @@ class PublishNewsCommand extends Command
     {
         $this->info('Starting WordPress publishing...');
 
-        $pendingNews = News::where('status', News::STATUS_PENDING)->get();
+        $processLogService = app(ProcessLogService::class);
+        $processLog = $processLogService->startRun('publish_pending', [
+            'source' => 'cli',
+        ]);
 
-        if ($pendingNews->isEmpty()) {
-            $this->info('No pending news to publish.');
-            $this->sendSummaryEmail(['success' => [], 'failed' => []]);
-            return Command::SUCCESS;
-        }
+        try {
+            $pendingNews = News::where('status', News::STATUS_PENDING)->get();
+
+            if ($pendingNews->isEmpty()) {
+                $this->info('No pending news to publish.');
+                $this->sendSummaryEmail(['success' => [], 'failed' => []]);
+                $processLogService->finishRun($processLog, ProcessLogService::STATUS_SUCCESS, [
+                    'published' => 0,
+                    'failed' => 0,
+                    'note' => 'No pending news to publish',
+                ], 'No pending news to publish.');
+                return Command::SUCCESS;
+            }
 
         $this->info("Found {$pendingNews->count()} pending news items.");
 
@@ -32,8 +44,8 @@ class PublishNewsCommand extends Command
             'failed'  => [],   // failed    (status 1)
         ];
 
-        foreach ($pendingNews as $news) {
-            $this->line("Processing news #{$news->id} [{$news->lang}]: {$news->title}");
+            foreach ($pendingNews as $news) {
+                $this->line("Processing news #{$news->id} [{$news->lang}]: {$news->title}");
 
             // Mark as syncing immediately so interrupted runs are visible
             $news->status = News::STATUS_SYNCING;
@@ -80,13 +92,30 @@ class PublishNewsCommand extends Command
             }
         }
 
-        $this->sendSummaryEmail($results);
+            $this->sendSummaryEmail($results);
 
-        $successCount = count($results['success']);
-        $failedCount  = count($results['failed']);
-        $this->info("Publishing terminé — Succès: {$successCount} | Échec: {$failedCount}");
+            $successCount = count($results['success']);
+            $failedCount  = count($results['failed']);
+            $this->info("Publishing terminé — Succès: {$successCount} | Échec: {$failedCount}");
 
-        return Command::SUCCESS;
+            $status = $failedCount > 0
+                ? ProcessLogService::STATUS_PARTIAL
+                : ProcessLogService::STATUS_SUCCESS;
+
+            $processLogService->finishRun($processLog, $status, [
+                'published' => $successCount,
+                'failed' => $failedCount,
+                'failed_items' => $results['failed'],
+            ], 'Publishing completed.');
+
+            return Command::SUCCESS;
+        } catch (\Throwable $e) {
+            $this->error('Fatal error: ' . $e->getMessage());
+            $processLogService->failRun($processLog, $e, [
+                'note' => 'Fatal error in news:publish',
+            ]);
+            return Command::FAILURE;
+        }
     }
 
     // -------------------------------------------------------------------------

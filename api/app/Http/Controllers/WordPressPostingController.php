@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\News;
+use App\Services\ProcessLogService;
 use App\Services\WordPressPostingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -205,13 +206,27 @@ class WordPressPostingController extends Controller
      */
     public function publishPendingNews(): JsonResponse
     {
+        $processLog = null;
+        $processLogService = app(ProcessLogService::class);
+
         try {
             @ini_set('max_execution_time', '300');
             @set_time_limit(300);
 
+            $processLog = $processLogService->startRun('publish_pending', [
+                'source' => 'api',
+            ]);
+
             $pendingNews = News::where('status', News::STATUS_PENDING)->get();
 
             if ($pendingNews->isEmpty()) {
+                if ($processLog) {
+                    $processLogService->finishRun($processLog, ProcessLogService::STATUS_SUCCESS, [
+                        'published' => 0,
+                        'failed' => 0,
+                        'note' => 'No pending news to publish',
+                    ], 'No pending news to publish.');
+                }
                 return response()->json([
                     'success' => true,
                     'message' => 'No pending news to publish.',
@@ -263,6 +278,19 @@ class WordPressPostingController extends Controller
             // Send summary email
             $this->sendPublishSummaryEmail($results);
 
+            if ($processLog) {
+                $failedCount = count($results['failed']);
+                $status = $failedCount > 0
+                    ? ProcessLogService::STATUS_PARTIAL
+                    : ProcessLogService::STATUS_SUCCESS;
+
+                $processLogService->finishRun($processLog, $status, [
+                    'published' => count($results['success']),
+                    'failed' => $failedCount,
+                    'failed_items' => $results['failed'],
+                ], 'Publishing completed.');
+            }
+
             return response()->json([
                 'success'   => true,
                 'message'   => 'Publishing completed.',
@@ -273,6 +301,13 @@ class WordPressPostingController extends Controller
 
         } catch (\Throwable $e) {
             Log::error("Fatal error in publishPendingNews: " . $e->getMessage());
+
+            if ($processLog) {
+                $processLogService->failRun($processLog, $e, [
+                    'note' => 'Fatal error in publishPendingNews',
+                ]);
+            }
+
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),

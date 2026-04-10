@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\NewsController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\ProcessLogController;
 use App\Http\Controllers\WordPressPostingController;
 use Illuminate\Support\Facades\Route;
 
@@ -33,4 +34,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
 	// Statistics
 	Route::get('/stats', [WordPressPostingController::class, 'newsStats']);
+
+	// Process logs
+	Route::get('/process-logs', [ProcessLogController::class, 'index']);
+	Route::get('/process-logs/{id}', [ProcessLogController::class, 'show']);
 });

@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import type { NewsFilters, NewsItem, PaginatedNews } from "~/types/news";
+import type { PaginatedProcessLogs, ProcessLogItem } from "~/types/processLog";
 import { useApi } from "~/composables/useApi";
 
 type ApiResult<T> = {
@@ -40,7 +41,16 @@ export const useNewsStore = defineStore("news", {
     } as NewsFilters,
     stats: null as null | Record<string, any>,
     preview: "",
-    previewItem: null as null | NewsItem
+    previewItem: null as null | NewsItem,
+
+    processLogs: [] as ProcessLogItem[],
+    processLogsLoading: false,
+    processLogsPagination: {
+      current_page: 1,
+      last_page: 1,
+      per_page: 20,
+      total: 0
+    }
   }),
   getters: {
     allSelected(state) {
@@ -141,6 +151,40 @@ export const useNewsStore = defineStore("news", {
         this.stats = response.data;
       } catch {
         this.stats = null;
+      }
+    },
+
+    async fetchProcessLogs() {
+      const { request } = useApi();
+      this.processLogsLoading = true;
+
+      try {
+        const params = new URLSearchParams();
+        params.set("per_page", "20");
+        params.set("sort_by", "created_at");
+        params.set("sort_dir", "desc");
+
+        const response = await request<{ success: boolean; data: PaginatedProcessLogs }>(
+          `/process-logs?${params.toString()}`
+        );
+
+        this.processLogs = response.data.data;
+        this.processLogsPagination = {
+          current_page: response.data.current_page,
+          last_page: response.data.last_page,
+          per_page: response.data.per_page,
+          total: response.data.total
+        };
+      } catch {
+        this.processLogs = [];
+        this.processLogsPagination = {
+          current_page: 1,
+          last_page: 1,
+          per_page: 20,
+          total: 0
+        };
+      } finally {
+        this.processLogsLoading = false;
       }
     },
     async runSyncWordPress() {

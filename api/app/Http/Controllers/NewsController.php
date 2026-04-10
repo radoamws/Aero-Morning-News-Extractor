@@ -7,6 +7,7 @@ use App\Models\News;
 use App\Services\EmailService;
 use App\Services\ImageService;
 use App\Services\OpenAIService;
+use App\Services\ProcessLogService;
 use App\Services\WordPressService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -84,8 +85,18 @@ class NewsController extends Controller
      */
     public function processEmails(): JsonResponse
     {
+        $processLog = null;
+        $processLogService = app(ProcessLogService::class);
+
         try {
             $this->ensureEmailProcessingServices();
+
+            $processLog = $processLogService->startRun('emails_process', [
+                'source' => app()->runningInConsole() ? 'cli' : 'api',
+                'details' => [
+                    'imap_criteria' => env('IMAP_SEARCH_CRITERIA'),
+                ],
+            ]);
 
             // Real mailbox processing can be slower on large multipart emails.
             // Keep a reasonable cap for HTTP, but allow long runs for artisan.
@@ -100,6 +111,14 @@ class NewsController extends Controller
             $emails = $this->emailService->getUnreadEmails();
 
             if (empty($emails)) {
+                if ($processLog) {
+                    $processLogService->finishRun($processLog, ProcessLogService::STATUS_SUCCESS, [
+                        'processed' => 0,
+                        'failed' => 0,
+                        'skipped' => 0,
+                        'note' => 'No emails to process for current IMAP criteria',
+                    ]);
+                }
                 return response()->json([
                     'success' => true,
                     'message' => 'No emails to process for current IMAP criteria',
@@ -137,6 +156,20 @@ class NewsController extends Controller
 
             $this->sendProcessingSummaryEmail($summary);
 
+            if ($processLog) {
+                $status = $failedCount > 0
+                    ? ProcessLogService::STATUS_PARTIAL
+                    : ProcessLogService::STATUS_SUCCESS;
+
+                $processLogService->finishRun($processLog, $status, [
+                    'processed' => $processedCount,
+                    'failed' => $failedCount,
+                    'skipped' => $skippedCount,
+                    'failed_items' => $summary['failed'] ?? [],
+                    'skipped_items' => $summary['skipped'] ?? [],
+                ], 'Email processing completed');
+            }
+
             $response = [
                 'success' => true,
                 'message' => 'Email processing completed',
@@ -153,6 +186,13 @@ class NewsController extends Controller
             return response()->json($response);
         } catch (\Throwable $e) {
             Log::error('Error in email processing: ' . $e->getMessage());
+
+            if ($processLog) {
+                $processLogService->failRun($processLog, $e, [
+                    'note' => 'Fatal error in email processing',
+                ]);
+            }
+
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage()

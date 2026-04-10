@@ -20,7 +20,9 @@ const {
   preview,
   previewItem,
   isProcessing,
-  processProgress
+  processProgress,
+  processLogs,
+  processLogsLoading
 } = storeToRefs(newsStore);
 
 const wpUser = ref("");
@@ -115,7 +117,7 @@ const runBulkPost = async () => {
 };
 
 onMounted(async () => {
-  await Promise.all([newsStore.fetchNews(), newsStore.fetchStats()]);
+  await Promise.all([newsStore.fetchNews(), newsStore.fetchStats(), newsStore.fetchProcessLogs()]);
 });
 </script>
 
@@ -333,6 +335,74 @@ onMounted(async () => {
         >
           Page suivante
         </button>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>Logs traitements</h2>
+      <div class="actions-row between">
+        <p class="muted">Derniers runs (emails + publish pending).</p>
+        <button class="btn btn-ghost" :disabled="processLogsLoading" @click="newsStore.fetchProcessLogs()">
+          Rafraichir logs
+        </button>
+      </div>
+
+      <div class="table-wrap">
+        <table style="min-width: 960px;">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Type</th>
+              <th>Source</th>
+              <th>Statut</th>
+              <th>Debut</th>
+              <th>Fin</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="processLogsLoading">
+              <td colspan="7">Chargement...</td>
+            </tr>
+            <tr v-if="!processLogsLoading && processLogs.length === 0">
+              <td colspan="7">Aucun log</td>
+            </tr>
+            <template v-for="log in processLogs" :key="log.id">
+              <tr>
+                <td>{{ log.id }}</td>
+                <td><span class="pill">{{ log.process_type }}</span></td>
+                <td>{{ log.source || '-' }}</td>
+                <td>
+                  <span
+                    :class="[
+                      'pill',
+                      log.status === 'success'
+                        ? 'status-2'
+                        : log.status === 'partial'
+                          ? 'status-0'
+                          : log.status === 'failed'
+                            ? 'error'
+                            : 'status-1'
+                    ]"
+                  >
+                    {{ log.status }}
+                  </span>
+                </td>
+                <td>{{ log.started_at ? new Date(log.started_at).toLocaleString('fr-FR') : '-' }}</td>
+                <td>{{ log.finished_at ? new Date(log.finished_at).toLocaleString('fr-FR') : '-' }}</td>
+                <td class="truncate" :title="log.message || ''">{{ log.message || '-' }}</td>
+              </tr>
+              <tr v-if="log.details">
+                <td colspan="7">
+                  <details>
+                    <summary class="muted">Details</summary>
+                    <pre style="white-space: pre-wrap; margin: 8px 0 0;">{{ log.details }}</pre>
+                  </details>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
       </div>
     </article>
 
