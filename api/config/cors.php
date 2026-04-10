@@ -19,7 +19,12 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => ['*'],
+    // Comma-separated list of allowed origins. Example:
+    // CORS_ALLOWED_ORIGINS=https://news.aeromorning.com,https://staging.news.aeromorning.com
+    'allowed_origins' => array_values(array_filter(array_map(
+        static fn ($v) => trim((string) $v),
+        explode(',', (string) env('CORS_ALLOWED_ORIGINS', '*'))
+    ))),
 
     'allowed_origins_patterns' => [],
 

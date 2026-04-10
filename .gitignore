@@ -19,3 +19,10 @@ yarn-error.log
 /.vscode
 /gestion-news/node_modules
 /api/vendor
+/gestion-news/.nuxt
+/gestion-news/dist
+/gestion-news/.output
+/gestion-news/.env
+/gestion-news/.env.local
+/gestion-news/.env.*.local
+/gestion-news/.env.backup
