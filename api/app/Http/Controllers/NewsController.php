@@ -225,7 +225,8 @@ class NewsController extends Controller
             $hasAttachments = $this->emailService->hasAttachments($mail);
             $imageUrl = null;
             if ($hasAttachments) {
-                $bestAttachment = $this->selectBestImageAttachment($mail->getAttachments());
+                $inlineCidFilenames = $this->extractInlineCidFilenames((string) ($emailContent['html_body'] ?? ''));
+                $bestAttachment = $this->selectBestImageAttachment($mail->getAttachments(), $inlineCidFilenames);
                 if ($bestAttachment) {
                     $filePath = $bestAttachment->filePath ?? null;
                     if ($filePath) {
@@ -240,20 +241,29 @@ class NewsController extends Controller
             Log::info("Email subject: " . $emailContent['subject']);
             Log::info("Has attachment: " . ($hasAttachments ? 'yes' : 'no'));
 
-            if (!$hasAttachments) {
+            // If no usable attachment image was found, fall back to HTML image candidates.
+            if (!$hasAttachments || $imageUrl === null) {
                 $imageSelectionContent = $normalizedBodyContent;
 
                 $imageCandidates = $this->emailService->extractImageCandidatesFromHtml($imageSelectionContent);
-                $foundImageUrl = $this->openaiService->chooseRelevantImageUrl(
-                    $languageDetectionText !== '' ? $languageDetectionText : $imageSelectionContent,
-                    $imageCandidates
-                );
+                $imageCandidates = array_values(array_filter($imageCandidates, fn ($url) => !$this->isForbiddenSignatureImageUrl((string) $url)));
 
-                if ($foundImageUrl && $this->imageService->isValidImageUrl($foundImageUrl)) {
-                    $imageUrl = $this->imageService->downloadAndOptimizeImage(
-                        $foundImageUrl,
-                        $emailContent['subject']
+                // Never let OpenAI pick a forbidden signature image.
+                if (!empty($imageCandidates)) {
+                    $foundImageUrl = $this->openaiService->chooseRelevantImageUrl(
+                        $languageDetectionText !== '' ? $languageDetectionText : $imageSelectionContent,
+                        $imageCandidates
                     );
+
+                    if ($foundImageUrl
+                        && !$this->isForbiddenSignatureImageUrl($foundImageUrl)
+                        && $this->imageService->isValidImageUrl($foundImageUrl)
+                    ) {
+                        $imageUrl = $this->imageService->downloadAndOptimizeImage(
+                            $foundImageUrl,
+                            $emailContent['subject']
+                        );
+                    }
                 }
             }
 
@@ -1533,10 +1543,46 @@ class NewsController extends Controller
         return rtrim(mb_substr($text, 0, $maxChars));
     }
 
-    private function selectBestImageAttachment(array $attachments): ?object
+    private function isForbiddenSignatureImageUrl(string $url): bool
+    {
+        $url = strtolower($url);
+        return str_contains($url, 'cid:')
+            || str_contains($url, 'amws')
+            || str_contains($url, 'amltd');
+    }
+
+    private function extractInlineCidFilenames(string $html): array
+    {
+        if (trim($html) === '') {
+            return [];
+        }
+
+        $matches = [];
+        preg_match_all('/\bcid:([^"\'\s>]+)/i', $html, $matches);
+        $values = $matches[1] ?? [];
+
+        $filenames = [];
+        foreach ($values as $value) {
+            $value = (string) $value;
+            $value = explode('@', $value, 2)[0];
+            $value = trim($value);
+            if ($value !== '') {
+                $filenames[strtolower($value)] = true;
+            }
+        }
+
+        return array_keys($filenames);
+    }
+
+    private function selectBestImageAttachment(array $attachments, array $inlineCidFilenames = []): ?object
     {
         $bestAttachment = null;
         $bestScore = -1;
+
+        $inlineCidLookup = [];
+        foreach ($inlineCidFilenames as $name) {
+            $inlineCidLookup[strtolower((string) $name)] = true;
+        }
 
         foreach ($attachments as $attachment) {
             $mimeType = strtolower((string) ($attachment->mimeType ?? $attachment->mime ?? ''));
@@ -1547,6 +1593,16 @@ class NewsController extends Controller
             }
 
             $name = strtolower((string) ($attachment->name ?? basename((string) $filePath)));
+
+            // Signature/inline images are typically referenced as cid:... in the HTML.
+            if ($name !== '' && isset($inlineCidLookup[$name])) {
+                continue;
+            }
+
+            if (str_contains($name, 'amws') || str_contains($name, 'amltd')) {
+                continue;
+            }
+
             $size = (int) ($attachment->sizeInBytes ?? @filesize($filePath) ?: 0);
             $score = $size;
 
