@@ -329,6 +329,17 @@ EXEMPLE VALIDE :
         LISTE DES TAGS DISPONIBLES:
         $tagsList
 
+                ========================
+                RÈGLE DE QUANTITÉ (TRÈS IMPORTANT)
+                ========================
+                - Par défaut, retourne AU MAXIMUM 5 tags (wp_id).
+                - N'ajoute jamais de tags 'pour faire joli' : si tu n'es pas sûr qu'un tag est directement pertinent, ne le sélectionne pas.
+
+                EXCEPTION (uniquement si présent dans le contenu) :
+                - Si le contenu de la news contient une LISTE EXPLICITE de tags/mots-clés/hashtags (ex: une ligne Tags: / Mots-clés: / Keywords: ou une liste de #hashtags),
+                    alors retourne UNIQUEMENT les tags de cette liste qui existent dans la LISTE DES TAGS DISPONIBLES.
+                    Dans ce cas précis, tu peux dépasser 5, mais tu n'as pas le droit d'ajouter d'autres tags.
+
         ========================
         FILTRES D'EXCLUSION STRICTS (IMPORTANT)
         ========================

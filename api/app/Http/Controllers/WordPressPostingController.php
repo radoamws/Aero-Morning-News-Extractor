@@ -67,6 +67,17 @@ class WordPressPostingController extends Controller
             ], 422);
         } catch (\Exception $e) {
             Log::error("Error posting news to WordPress: " . $e->getMessage());
+
+            // Ensure we don't leave the item stuck in STATUS_SYNCING.
+            try {
+                if (isset($news) && $news instanceof News) {
+                    $news->status = News::STATUS_PENDING;
+                    $news->save();
+                }
+            } catch (\Throwable $_) {
+                // ignore secondary persistence failures
+            }
+
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage()
@@ -217,6 +228,11 @@ class WordPressPostingController extends Controller
                 'source' => 'api',
             ]);
 
+            // Auto-recover from previous interrupted runs: revert old "syncing" items to pending.
+            // Status=SYNCING must be transient; leaving items at 1 would block future runs.
+            $resetBeforeRun = News::where('status', News::STATUS_SYNCING)
+                ->update(['status' => News::STATUS_PENDING]);
+
             $pendingNews = News::where('status', News::STATUS_PENDING)->get();
 
             if ($pendingNews->isEmpty()) {
@@ -257,6 +273,10 @@ class WordPressPostingController extends Controller
                             'wp_post_id' => $result['wp_post_id'],
                         ];
                     } else {
+                        // Revert to pending so it can be retried later.
+                        $news->status = News::STATUS_PENDING;
+                        $news->save();
+
                         $results['failed'][] = [
                             'id'    => $news->id,
                             'lang'  => $news->lang,
@@ -266,6 +286,15 @@ class WordPressPostingController extends Controller
                     }
                 } catch (\Throwable $e) {
                     Log::error("Error publishing news #{$news->id}: " . $e->getMessage());
+
+                    // Revert to pending so it can be retried later.
+                    try {
+                        $news->status = News::STATUS_PENDING;
+                        $news->save();
+                    } catch (\Throwable $_) {
+                        // ignore secondary persistence failures
+                    }
+
                     $results['failed'][] = [
                         'id'    => $news->id,
                         'lang'  => $news->lang,
@@ -329,7 +358,7 @@ class WordPressPostingController extends Controller
         $body .= str_repeat('=', 60) . "\n\n";
         $body .= "Total traité dans ce batch : {$total}\n";
         $body .= "  ✓ Publiées avec succès (status 2) : {$successCount}\n";
-        $body .= "  ✗ En échec            (status 1) : {$failedCount}\n";
+        $body .= "  ✗ En échec (restent en attente status 0) : {$failedCount}\n";
 
         if ($remainingPending > 0) {
             $body .= "  ⚠ Non traitées         (status 0) : {$remainingPending}\n";
@@ -350,7 +379,7 @@ class WordPressPostingController extends Controller
 
         if (!empty($results['failed'])) {
             $body .= str_repeat('-', 60) . "\n";
-            $body .= "NEWS EN ÉCHEC (status 1)\n";
+            $body .= "NEWS EN ÉCHEC (status 0 — à retenter)\n";
             $body .= str_repeat('-', 60) . "\n";
             foreach ($results['failed'] as $item) {
                 $body .= "  [#{$item['id']}] [{$item['lang']}] {$item['title']}\n";

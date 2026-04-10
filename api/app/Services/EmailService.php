@@ -85,9 +85,9 @@ class EmailService
     }
 
     /**
-     * Get emails from mailbox based on configured criteria.
+     * Get email IDs from mailbox based on configured criteria.
      */
-    public function getUnreadEmails(): array
+    public function getUnreadEmailIds(): array
     {
         try {
             if (!extension_loaded('imap')) {
@@ -111,19 +111,35 @@ class EmailService
                 return [];
             }
 
-            $emails = [];
-            foreach ($mailsIds as $mailId) {
-                try {
-                    $emails[] = $this->mailbox->getMail($mailId);
-                } catch (\Exception $e) {
-                    Log::warning("Error fetching email ID $mailId: " . $e->getMessage());
-                    continue;
-                }
-            }
-
-            return $emails;
+            return $mailsIds;
         } catch (\Throwable $e) {
             Log::error('Error fetching unread emails: ' . $e->getMessage());
+            throw new \RuntimeException($e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Fetch a single mail by ID without marking it as seen.
+     */
+    public function getMailById(int $mailId): IncomingMail
+    {
+        try {
+            if (!extension_loaded('imap')) {
+                throw new \RuntimeException('PHP IMAP extension is not enabled.');
+            }
+
+            if (!$this->mailbox) {
+                $this->initializeMailbox();
+            }
+
+            if (!$this->mailbox) {
+                throw new \RuntimeException('IMAP mailbox is unavailable.');
+            }
+
+            // IMPORTANT: do not mark emails as seen just by reading them.
+            return $this->mailbox->getMail($mailId, false);
+        } catch (\Throwable $e) {
+            Log::warning("Error fetching email ID {$mailId}: " . $e->getMessage());
             throw new \RuntimeException($e->getMessage(), 0, $e);
         }
     }

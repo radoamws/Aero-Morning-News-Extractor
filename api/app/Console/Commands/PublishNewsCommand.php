@@ -24,6 +24,15 @@ class PublishNewsCommand extends Command
         ]);
 
         try {
+            // Auto-recover from previous interrupted runs: revert lingering "syncing" items to pending.
+            // Status=SYNCING must be transient; leaving items at 1 would block future runs.
+            $resetBeforeRun = News::where('status', News::STATUS_SYNCING)
+                ->update(['status' => News::STATUS_PENDING]);
+
+            if ($resetBeforeRun > 0) {
+                $this->warn("Reset {$resetBeforeRun} stuck syncing item(s) back to pending.");
+            }
+
             $pendingNews = News::where('status', News::STATUS_PENDING)->get();
 
             if ($pendingNews->isEmpty()) {
@@ -41,7 +50,7 @@ class PublishNewsCommand extends Command
 
         $results = [
             'success' => [],   // published (status 2)
-            'failed'  => [],   // failed    (status 1)
+        'failed'  => [],   // failed (reverted back to status 0)
         ];
 
             foreach ($pendingNews as $news) {
@@ -68,7 +77,10 @@ class PublishNewsCommand extends Command
 
                     $this->info("  ✓ Publié — WP post ID: {$result['wp_post_id']}");
                 } else {
-                    // Leave at status 1 so it is visible as "stuck"
+                    // Revert to pending so it can be retried later.
+                    $news->status = News::STATUS_PENDING;
+                    $news->save();
+
                     $results['failed'][] = [
                         'id'    => $news->id,
                         'lang'  => $news->lang,
@@ -80,6 +92,14 @@ class PublishNewsCommand extends Command
                 }
             } catch (\Throwable $e) {
                 Log::error("Unexpected error publishing news #{$news->id}: " . $e->getMessage());
+
+                // Revert to pending so it can be retried later.
+                try {
+                    $news->status = News::STATUS_PENDING;
+                    $news->save();
+                } catch (\Throwable $_) {
+                    // ignore secondary persistence failures
+                }
 
                 $results['failed'][] = [
                     'id'    => $news->id,
@@ -134,7 +154,7 @@ class PublishNewsCommand extends Command
         $body .= str_repeat('=', 60) . "\n\n";
         $body .= "Total traité dans ce batch : {$total}\n";
         $body .= "  ✓ Publiées avec succès (status 2) : {$successCount}\n";
-        $body .= "  ✗ En échec            (status 1) : {$failedCount}\n";
+        $body .= "  ✗ En échec (restent en attente status 0) : {$failedCount}\n";
 
         if ($remainingPending > 0) {
             $body .= "  ⚠ Non traitées         (status 0) : {$remainingPending}  ← traitement possiblement interrompu\n";
@@ -155,7 +175,7 @@ class PublishNewsCommand extends Command
 
         if (!empty($results['failed'])) {
             $body .= str_repeat('-', 60) . "\n";
-            $body .= "NEWS EN ÉCHEC (status 1)\n";
+            $body .= "NEWS EN ÉCHEC (status 0 — à retenter)\n";
             $body .= str_repeat('-', 60) . "\n";
             foreach ($results['failed'] as $item) {
                 $body .= "  [#{$item['id']}] [{$item['lang']}] {$item['title']}\n";

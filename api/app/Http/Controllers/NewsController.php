@@ -11,6 +11,7 @@ use App\Services\ProcessLogService;
 use App\Services\WordPressService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
@@ -108,9 +109,9 @@ class NewsController extends Controller
                 @set_time_limit(300);
             }
 
-            $emails = $this->emailService->getUnreadEmails();
+            $mailIds = $this->emailService->getUnreadEmailIds();
 
-            if (empty($emails)) {
+            if (empty($mailIds)) {
                 if ($processLog) {
                     $processLogService->finishRun($processLog, ProcessLogService::STATUS_SUCCESS, [
                         'processed' => 0,
@@ -137,8 +138,26 @@ class NewsController extends Controller
                 'skipped' => [],
             ];
 
-            foreach ($emails as $mail) {
+            foreach ($mailIds as $mailId) {
                 try {
+                    if (app()->runningInConsole()) {
+                        fwrite(STDOUT, "→ Fetching email ID {$mailId}..." . PHP_EOL);
+                    }
+                    $mail = $this->emailService->getMailById((int) $mailId);
+
+                    if (app()->runningInConsole()) {
+                        $subjectPreview = '';
+                        try {
+                            $subjectPreview = is_string($mail->subject ?? null) ? trim((string) $mail->subject) : '';
+                        } catch (\Throwable $_) {
+                            $subjectPreview = '';
+                        }
+                        if ($subjectPreview !== '') {
+                            $subjectPreview = mb_substr($subjectPreview, 0, 120);
+                            fwrite(STDOUT, "   Subject: {$subjectPreview}" . PHP_EOL);
+                        }
+                    }
+
                     $result = $this->processSingleEmail($mail, $summary);
 
                     if ($result === self::EMAIL_RESULT_PROCESSED) {
@@ -148,9 +167,23 @@ class NewsController extends Controller
                     } else {
                         $failedCount++;
                     }
+
+                    if (app()->runningInConsole()) {
+                        fwrite(STDOUT, "   Status: {$result} | processed={$processedCount}, skipped={$skippedCount}, failed={$failedCount}" . PHP_EOL);
+                    }
                 } catch (\Throwable $e) {
-                    Log::error("Error processing email: " . $e->getMessage());
+                    Log::error("Error processing email {$mailId}: " . $e->getMessage());
                     $failedCount++;
+
+                    $summary['failed'][] = [
+                        'subject' => 'unknown',
+                        'from' => '',
+                        'error' => $e->getMessage(),
+                    ];
+
+                    if (app()->runningInConsole()) {
+                        fwrite(STDOUT, "   Status: failed | processed={$processedCount}, skipped={$skippedCount}, failed={$failedCount}" . PHP_EOL);
+                    }
                 }
             }
 
@@ -239,6 +272,7 @@ class NewsController extends Controller
                     'from' => $emailContent['from'] ?? '',
                     'reason' => 'already_processed',
                 ];
+                // Already in DB => OK to mark as read.
                 $this->emailService->markAsRead($mail->id);
                 return self::EMAIL_RESULT_SKIPPED;
             }
@@ -251,13 +285,29 @@ class NewsController extends Controller
             $languageDetectionText = $this->normalizePlainTextContent(strip_tags($normalizedBodyContent));
 
             if (!$this->openaiService->isAviationRelevant($languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent)) {
-                $this->storeIgnoredEmail($emailContent, $languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent, 'not_relevant');
+                $ignoredStored = $this->storeIgnoredEmail(
+                    $emailContent,
+                    $languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent,
+                    'not_relevant'
+                );
+
+                if (!$ignoredStored) {
+                    $summary['failed'][] = [
+                        'subject' => $emailContent['subject'] ?? 'no-subject',
+                        'from' => $emailContent['from'] ?? '',
+                        'error' => 'Ignored email could not be persisted to DB; email left unread for retry',
+                    ];
+
+                    return self::EMAIL_RESULT_FAILED;
+                }
+
                 $summary['skipped'][] = [
                     'subject' => $emailContent['subject'] ?? 'no-subject',
                     'from' => $emailContent['from'] ?? '',
                     'reason' => 'not_relevant',
                 ];
                 Log::info('Skipping non-aviation email: ' . ($emailContent['subject'] ?? 'no-subject'));
+                // Only mark as read if the ignored-email record was persisted.
                 $this->emailService->markAsRead($mail->id);
                 return self::EMAIL_RESULT_SKIPPED;
             }
@@ -308,6 +358,8 @@ class NewsController extends Controller
             }
 
             $createdAny = false;
+            $createdFr = false;
+            $createdEn = false;
 
             // IMPORTANT: As requested, we pass the raw $emailContent at the end of the prompt.
             // No PHP-side formatting/cleanup is applied to content fields.
@@ -323,17 +375,21 @@ class NewsController extends Controller
                 return self::EMAIL_RESULT_FAILED;
             }
 
+            $wantsFr = (($newsPayload['FR'] ?? '') !== '') && !in_array('FR', $existingLangs, true);
+            $wantsEn = (($newsPayload['EN'] ?? '') !== '') && !in_array('EN', $existingLangs, true);
+
             if (($newsPayload['FR'] ?? '') !== '') {
                 if (in_array('FR', $existingLangs, true)) {
                     Log::info("French news already exists for email: " . $emailContent['message_id']);
                 } else {
-                    $createdAny = $this->processFrenchNews(
+                    $createdFr = $this->processFrenchNews(
                         $newsPayload,
                         (string) ($emailContent['subject'] ?? ''),
                         (string) ($emailContent['message_id'] ?? ''),
                         $imageUrl,
                         $contentBrut
-                    ) || $createdAny;
+                    );
+                    $createdAny = $createdFr || $createdAny;
                 }
             }
 
@@ -341,13 +397,14 @@ class NewsController extends Controller
                 if (in_array('EN', $existingLangs, true)) {
                     Log::info("English news already exists for email: " . $emailContent['message_id']);
                 } else {
-                    $createdAny = $this->processEnglishNews(
+                    $createdEn = $this->processEnglishNews(
                         $newsPayload,
                         (string) ($emailContent['subject'] ?? ''),
                         (string) ($emailContent['message_id'] ?? ''),
                         $imageUrl,
                         $contentBrut
-                    ) || $createdAny;
+                    );
+                    $createdAny = $createdEn || $createdAny;
                 }
             }
 
@@ -357,6 +414,9 @@ class NewsController extends Controller
                     'from' => $emailContent['from'] ?? '',
                     'reason' => 'already_processed',
                 ];
+
+                // Already in DB (at least one language) => OK to mark as read.
+                $this->emailService->markAsRead($mail->id);
                 return self::EMAIL_RESULT_SKIPPED;
             }
 
@@ -370,8 +430,26 @@ class NewsController extends Controller
                 return self::EMAIL_RESULT_FAILED;
             }
 
-            // Mark email as read
-            $this->emailService->markAsRead($mail->id);
+            // Mark as read only if the DB write(s) succeeded for everything we intended to create.
+            // This prevents losing emails (marking read) when nothing was persisted.
+            $shouldMarkAsRead = true;
+            if ($wantsFr && !$createdFr) {
+                $shouldMarkAsRead = false;
+            }
+            if ($wantsEn && !$createdEn) {
+                $shouldMarkAsRead = false;
+            }
+
+            if ($shouldMarkAsRead) {
+                $this->emailService->markAsRead($mail->id);
+            } else {
+                $summary['failed'][] = [
+                    'subject' => $emailContent['subject'] ?? 'no-subject',
+                    'from' => $emailContent['from'] ?? '',
+                    'error' => 'Partial insert: at least one language failed; email left unread for retry',
+                ];
+                return self::EMAIL_RESULT_FAILED;
+            }
 
             $summary['processed'][] = [
                 'subject' => $emailContent['subject'] ?? 'no-subject',
@@ -390,19 +468,24 @@ class NewsController extends Controller
         }
     }
 
-    private function storeIgnoredEmail(array $emailContent, string $excerpt, string $reason): void
+    private function storeIgnoredEmail(array $emailContent, string $excerpt, string $reason): bool
     {
         try {
-            IgnoredEmail::create([
-                'message_id' => (string) ($emailContent['message_id'] ?? ''),
-                'subject' => (string) ($emailContent['subject'] ?? ''),
-                'sender' => (string) ($emailContent['from'] ?? ''),
-                'reason' => $reason,
-                'excerpt' => mb_substr(trim($excerpt), 0, 5000),
-                'processed_at' => now(),
-            ]);
+            DB::transaction(function () use ($emailContent, $excerpt, $reason): void {
+                IgnoredEmail::create([
+                    'message_id' => (string) ($emailContent['message_id'] ?? ''),
+                    'subject' => (string) ($emailContent['subject'] ?? ''),
+                    'sender' => (string) ($emailContent['from'] ?? ''),
+                    'reason' => $reason,
+                    'excerpt' => mb_substr(trim($excerpt), 0, 5000),
+                    'processed_at' => now(),
+                ]);
+            });
+
+            return true;
         } catch (\Throwable $e) {
             Log::warning('Unable to persist ignored email: ' . $e->getMessage());
+            return false;
         }
     }
 
