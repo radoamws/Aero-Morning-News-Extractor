@@ -26,3 +26,6 @@ yarn-error.log
 /gestion-news/.env.local
 /gestion-news/.env.*.local
 /gestion-news/.env.backup
+/gestion-news/*.zip
+/*.zip
+/api/*.zip
