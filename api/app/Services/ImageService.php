@@ -111,11 +111,12 @@ class ImageService
                 $this->maxHeight / $origHeight
             );
 
-            // Do not upscale small images.
-            $scale = min(1, $scale);
-
-            $newWidth = (int) ($origWidth * $scale);
-            $newHeight = (int) ($origHeight * $scale);
+            // Upscale or downscale to ensure the image fills at least one axis
+            // (either width == maxWidth or height == maxHeight) without exceeding the canvas.
+            $newWidth = (int) round($origWidth * $scale);
+            $newHeight = (int) round($origHeight * $scale);
+            $newWidth = max(1, min($this->maxWidth, $newWidth));
+            $newHeight = max(1, min($this->maxHeight, $newHeight));
 
             // Resize image
             $image->scale($newWidth, $newHeight);

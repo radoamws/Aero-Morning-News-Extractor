@@ -34,3 +34,4 @@ export { useApi } from '../composables/useApi';
 export { useAuthStore } from '../stores/auth';
 export { useNewsStore } from '../stores/news';
 export { defineStore, acceptHMRUpdate, usePinia, storeToRefs } from '../node_modules/@pinia/nuxt/dist/runtime/composables';
+export { useNuxtDevTools } from '../node_modules/@nuxt/devtools/dist/runtime/use-nuxt-devtools';
