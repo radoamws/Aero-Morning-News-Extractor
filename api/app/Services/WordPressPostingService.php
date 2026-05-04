@@ -243,6 +243,50 @@ class WordPressPostingService
         }
     }
 
+    private function updateYoastMetaBasicAuthDetailed(int $wpPostId, News $news, string $username, string $password): array
+    {
+        try {
+            $response = Http::withBasicAuth($username, $password)
+                ->withHeaders([
+                    'Content-Type' => 'application/json',
+                ])
+                ->timeout(15)
+                ->post("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
+                    'meta' => [
+                        '_yoast_wpseo_metadesc' => (string) ($news->metadescription ?? ''),
+                        '_yoast_wpseo_focuskw'  => (string) ($news->focuskeyphrase ?? ''),
+                    ],
+                ]);
+
+            if (!$response->successful()) {
+                Log::warning("Yoast meta update (basic auth) failed for WP post {$wpPostId} [{$response->status()}]");
+                return [
+                    'attempted' => true,
+                    'http_status' => $response->status(),
+                    'response_excerpt' => $this->excerptWpResponse($response->body()),
+                ];
+            }
+
+            Log::info("Yoast meta updated (basic auth) for WP post {$wpPostId}");
+            return [
+                'attempted' => true,
+                'http_status' => $response->status(),
+                'response_excerpt' => $this->excerptWpResponse($response->body()),
+            ];
+        } catch (\Throwable $e) {
+            Log::warning("Error updating Yoast meta (basic auth) for WP post {$wpPostId}: " . $e->getMessage());
+            return [
+                'attempted' => true,
+                'http_status' => null,
+                'response_excerpt' => null,
+                'exception' => [
+                    'message' => $e->getMessage(),
+                    'class' => get_class($e),
+                ],
+            ];
+        }
+    }
+
     private function excerptWpResponse(?string $body): ?string
     {
         if (!is_string($body)) {
@@ -280,9 +324,6 @@ class WordPressPostingService
                 'content' => $news->content,
                 'excerpt' => $news->metadescription,
                 'status' => 'publish',
-                'meta' => [
-                    'focus_keyphrase' => $news->focuskeyphrase,
-                ]
             ];
 
             // Add categories
@@ -312,6 +353,10 @@ class WordPressPostingService
             if ($response->successful()) {
                 $postId = $response->json()['id'];
                 Log::info("News Posted to WordPress with ID: $postId");
+
+                // Best-effort Yoast SEO meta update
+                $this->updateYoastMetaBasicAuthDetailed((int) $postId, $news, $username, $password);
+
                 return $postId;
             } else {
                 Log::error("WordPress API Error: " . $response->status() . " - " . $response->body());
@@ -387,7 +432,14 @@ class WordPressPostingService
                 ->timeout(30)
                 ->post("{$this->wpUrl}/wp-json/wp/v2/posts/$postId", $postData);
 
-            return $response->successful();
+            if (!$response->successful()) {
+                return false;
+            }
+
+            // Keep Yoast SEO in sync when updating manually
+            $this->updateYoastMetaBasicAuthDetailed((int) $postId, $news, $username, $password);
+
+            return true;
         } catch (\Exception $e) {
             Log::error("Error updating WordPress post: " . $e->getMessage());
             return false;
