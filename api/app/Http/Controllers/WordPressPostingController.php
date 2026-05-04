@@ -223,8 +223,26 @@ class WordPressPostingController extends Controller
         $debug = $request->boolean('debug');
 
         try {
-            @ini_set('max_execution_time', '300');
-            @set_time_limit(300);
+            $startedAt = microtime(true);
+            $httpMaxSeconds = (int) env('PUBLISH_PENDING_HTTP_MAX_SECONDS', 900);
+            if (app()->runningInConsole()) {
+                @ini_set('max_execution_time', '0');
+                @set_time_limit(0);
+                $deadline = PHP_FLOAT_MAX;
+            } else {
+                if ($httpMaxSeconds <= 0) {
+                    @ini_set('max_execution_time', '0');
+                    @set_time_limit(0);
+                    $deadline = PHP_FLOAT_MAX;
+                } else {
+                    @ini_set('max_execution_time', (string) $httpMaxSeconds);
+                    @set_time_limit($httpMaxSeconds);
+                    // Stop a bit before the PHP time limit to avoid fatal errors.
+                    $deadline = $startedAt + max(1, $httpMaxSeconds - 15);
+                }
+            }
+
+            $abortedDueToTimeBudget = false;
 
             $processLog = $processLogService->startRun('publish_pending', [
                 'source' => 'api',
@@ -256,6 +274,17 @@ class WordPressPostingController extends Controller
             $results = ['success' => [], 'failed' => []];
 
             foreach ($pendingNews as $news) {
+                if (!app()->runningInConsole() && microtime(true) >= $deadline) {
+                    $abortedDueToTimeBudget = true;
+                    Log::warning('publishPendingNews stopped early due to HTTP time budget', [
+                        'published' => count($results['success']),
+                        'failed' => count($results['failed']),
+                        'elapsed_seconds' => round(microtime(true) - $startedAt, 2),
+                        'http_max_seconds' => $httpMaxSeconds,
+                    ]);
+                    break;
+                }
+
                 // Mark as syncing
                 $news->status = News::STATUS_SYNCING;
                 $news->save();
@@ -332,18 +361,25 @@ class WordPressPostingController extends Controller
                     ? ProcessLogService::STATUS_PARTIAL
                     : ProcessLogService::STATUS_SUCCESS;
 
+                if ($abortedDueToTimeBudget) {
+                    $status = ProcessLogService::STATUS_PARTIAL;
+                }
+
                 $processLogService->finishRun($processLog, $status, [
                     'published' => count($results['success']),
                     'failed' => $failedCount,
+                    'aborted_due_to_time_budget' => $abortedDueToTimeBudget,
+                    'http_max_seconds' => app()->runningInConsole() ? null : $httpMaxSeconds,
                     'failed_items' => $results['failed'],
                 ], 'Publishing completed.');
             }
 
             return response()->json([
                 'success'   => true,
-                'message'   => 'Publishing completed.',
+                'message'   => $abortedDueToTimeBudget ? 'Publishing stopped early (time budget reached).' : 'Publishing completed.',
                 'published' => count($results['success']),
                 'failed'    => count($results['failed']),
+                'aborted_due_to_time_budget' => $abortedDueToTimeBudget,
                 'details'   => $results,
             ]);
 

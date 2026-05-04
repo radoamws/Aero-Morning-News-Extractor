@@ -57,8 +57,19 @@ class NewsController extends Controller
     public function syncWordPressData(): JsonResponse
     {
         try {
-            @ini_set('max_execution_time', '300');
-            @set_time_limit(300);
+            if (app()->runningInConsole()) {
+                @ini_set('max_execution_time', '0');
+                @set_time_limit(0);
+            } else {
+                $httpMaxSeconds = (int) env('WP_SYNC_HTTP_MAX_SECONDS', 900);
+                if ($httpMaxSeconds <= 0) {
+                    @ini_set('max_execution_time', '0');
+                    @set_time_limit(0);
+                } else {
+                    @ini_set('max_execution_time', (string) $httpMaxSeconds);
+                    @set_time_limit($httpMaxSeconds);
+                }
+            }
 
             $results = [
                 'categories_fr' => $this->wordpressService->syncCategoriesFr(),
@@ -100,13 +111,25 @@ class NewsController extends Controller
             ]);
 
             // Real mailbox processing can be slower on large multipart emails.
-            // Keep a reasonable cap for HTTP, but allow long runs for artisan.
+            // For HTTP requests, avoid PHP fatal timeouts by (a) setting a higher configurable limit
+            // and (b) stopping gracefully before reaching that deadline.
+            $startedAt = microtime(true);
+            $httpMaxSeconds = (int) env('EMAIL_PROCESS_HTTP_MAX_SECONDS', 900);
             if (app()->runningInConsole()) {
                 @ini_set('max_execution_time', '0');
                 @set_time_limit(0);
+                $deadline = PHP_FLOAT_MAX;
             } else {
-                @ini_set('max_execution_time', '300');
-                @set_time_limit(300);
+                if ($httpMaxSeconds <= 0) {
+                    @ini_set('max_execution_time', '0');
+                    @set_time_limit(0);
+                    $deadline = PHP_FLOAT_MAX;
+                } else {
+                    @ini_set('max_execution_time', (string) $httpMaxSeconds);
+                    @set_time_limit($httpMaxSeconds);
+                    // Stop ~15s before the PHP time limit to prevent fatal errors.
+                    $deadline = $startedAt + max(1, $httpMaxSeconds - 15);
+                }
             }
 
             $mailIds = $this->emailService->getUnreadEmailIds();
@@ -138,8 +161,24 @@ class NewsController extends Controller
                 'skipped' => [],
             ];
 
+            $totalEmails = count($mailIds);
+            $abortedDueToTimeBudget = false;
+
             foreach ($mailIds as $mailId) {
                 try {
+                    if (!app()->runningInConsole() && microtime(true) >= $deadline) {
+                        $abortedDueToTimeBudget = true;
+                        Log::warning('Email processing stopped early due to HTTP time budget', [
+                            'processed' => $processedCount,
+                            'skipped' => $skippedCount,
+                            'failed' => $failedCount,
+                            'total' => $totalEmails,
+                            'elapsed_seconds' => round(microtime(true) - $startedAt, 2),
+                            'http_max_seconds' => $httpMaxSeconds,
+                        ]);
+                        break;
+                    }
+
                     if (app()->runningInConsole()) {
                         fwrite(STDOUT, "→ Fetching email ID {$mailId}..." . PHP_EOL);
                     }
@@ -194,10 +233,16 @@ class NewsController extends Controller
                     ? ProcessLogService::STATUS_PARTIAL
                     : ProcessLogService::STATUS_SUCCESS;
 
+                if ($abortedDueToTimeBudget) {
+                    $status = ProcessLogService::STATUS_PARTIAL;
+                }
+
                 $processLogService->finishRun($processLog, $status, [
                     'processed' => $processedCount,
                     'failed' => $failedCount,
                     'skipped' => $skippedCount,
+                    'aborted_due_to_time_budget' => $abortedDueToTimeBudget,
+                    'http_max_seconds' => app()->runningInConsole() ? null : $httpMaxSeconds,
                     'failed_items' => $summary['failed'] ?? [],
                     'skipped_items' => $summary['skipped'] ?? [],
                 ], 'Email processing completed');
@@ -211,6 +256,12 @@ class NewsController extends Controller
                 'skipped' => $skippedCount,
 
             ];
+
+            if ($abortedDueToTimeBudget) {
+                $response['message'] = 'Email processing stopped early (time budget reached)';
+                $response['aborted_due_to_time_budget'] = true;
+                $response['total_emails'] = $totalEmails;
+            }
 
             if (config('app.debug')) {
                 $response['summary'] = $summary;
