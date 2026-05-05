@@ -63,7 +63,13 @@ class OpenAIService
                 ? $basePrompt
                 : $this->buildWordPressRepairPrompt($emailJson, (string) $lastRaw, $lastErrors);
 
-            $raw = $this->callOpenAI($prompt, 6000, 0.0, ['type' => 'json_object']);
+            $raw = $this->callOpenAI(
+                $prompt,
+                12000,
+                0.0,
+                ['type' => 'json_object'],
+                ['disable_fast_fallback' => true]
+            );
             $lastRaw = $raw;
 
             if ($raw === null) {
@@ -228,11 +234,9 @@ class OpenAIService
             . " - Après analyse, Fait une extraction du titre de la section française et met dans le JSON \"titleFR\" en texte brut sans HTML. Faire pareil pour la version EN mais a mettre dans \"titleEN\".\n"
             . " - si le \"titleFR\" dépasse les 62 caractères, reformule la phrase pour que ça soit moins de 62 caractères pour le SEO et met dans le json \"shorttitleFR\". Sinon, met directement le \"titleFR\" dans \"shorttitleFR\". Faire pareil pour la version EN mais a mettre dans la clé \"shorttitleEN\" du JSON.\n"
             . " - Fait un extraction du contenu de la version française tout en gardant les balises html pour la mise en page. (gras, saut de ligne, puce (ul, li, ...), italique, ...). Bien enlever tout ce qui ne concerne pas la news (actualité), mais garde la description de la société (A propos ...). Si la source de l'article n'est pas mentionné dans le contenu, ajoute à la fin ce format avec la source identifié \"Source: <le_nom_de_la_source>\" (la source peu être la société concerné ou aeromorning même si c'est mentionné). Encode-le dans la valeur de la clé FR du JSON. Si le \"titleFR\" dessus a dépassé les 62 caractères, modifie dans ce contenu HTML FR le titre complet \"titleFR\" pour que ça soit dans une balise h2, sinon l'enlever du contenu. Faire pareil pour la version EN mais a mettre dans le clé EN du JSON.\n"
-            . " - IMPORTANT POUR ÉVITER LES RÉPONSES COUPÉES: les champs HTML FR et EN doivent rester concis (max ~3500 caractères chacun). Supprime les répétitions et n'inclus pas de longues analyses.\n"
             . " - Génère un metadescription selon le contenu FR qui doit strictement faire entre 107 et 142 caractères et le mettre dans le JSON \"metadescriptionFR\". Faire pareil pour la version EN mais a mettre dans \"metadescriptionEN\" du JSON.\n"
             . " - Génère un FocusKeyPhrase depuis le contenu FR qui ne doit strictement pas avoir une virgule et le mettre dans \"focuskeyphraseFR\". Faire pareil pour la version EN mais a mettre dans \"focuskeyphraseEN\" du JSON.\n"
-            . " - Me retourner le JSON bien échappé car ça sera utilisé dans PHP.\n"
-            . " - Sortie: UNIQUEMENT le JSON brut, compact (pas d'indentation/retours à la ligne inutiles), sans Markdown.\n\n"
+            . " - Me retourner le JSON bien échappé car ça sera utilisé dans PHP.\n\n"
             . "IMPORTANT: Tu dois retourner uniquement le JSON brut (pas de Markdown, pas de ```). Le JSON doit être valide et parseable par json_decode en PHP. Les champs FR/EN contiennent du HTML avec de vraies balises (pas de &lt;p&gt;).\n\n"
             . "Voici le contenu du mail:\n\n"
             . $emailJson;
@@ -244,7 +248,6 @@ class OpenAIService
 
         return "Tu as retourné une réponse invalide/non conforme pour json_decode().\n"
             . "Corrige ta réponse et retourne UNIQUEMENT un JSON valide (pas de Markdown, pas de ```).\n"
-            . "Si ta réponse précédente était coupée/incomplète, raccourcis FR et EN (max ~3500 caractères chacun) et retourne un JSON compact.\n"
             . "Le JSON doit contenir exactement les clés suivantes: " . implode(', ', self::WP_JSON_KEYS) . ".\n"
             . "Erreurs à corriger: {$errorsText}.\n\n"
             . "RÉPONSE PRÉCÉDENTE (à corriger):\n"
@@ -1649,13 +1652,17 @@ EXEMPLE VALIDE :
         string $prompt,
         int $maxTokens = 500,
         float $temperature = 0.3,
-        ?array $responseFormat = null
+        ?array $responseFormat = null,
+        array $options = []
     ): ?string
     {
         $model = (string) env('OPENAI_MODEL', 'gpt-5-mini');
         $fallbackModel = trim((string) env('OPENAI_FALLBACK_MODEL', 'gpt-4o-mini'));
 
-        $useFastFallbackForGpt5 = filter_var(env('OPENAI_GPT5_FAST_FALLBACK', true), FILTER_VALIDATE_BOOL);
+        $disableFastFallback = (bool) ($options['disable_fast_fallback'] ?? false);
+
+        $useFastFallbackForGpt5 = !$disableFastFallback
+            && filter_var(env('OPENAI_GPT5_FAST_FALLBACK', true), FILTER_VALIDATE_BOOL);
         if ($useFastFallbackForGpt5
             && $fallbackModel !== ''
             && strtolower(trim($fallbackModel)) !== strtolower(trim($model))
