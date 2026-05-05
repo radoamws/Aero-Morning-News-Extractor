@@ -42,12 +42,14 @@ class OpenAIService
     /**
      * Extract both FR and EN news payloads for WordPress from a forwarded email.
      *
-     * IMPORTANT: As requested, we append the raw $emailContent (json-encoded) at the end of the prompt.
+     * IMPORTANT: We append the email content (json-encoded) at the end of the prompt.
+     * To avoid token overflows, we strip image tags / base64 image blobs from html_body before sending to OpenAI.
      * No PHP-side cleaning/formatting is performed on the returned payload.
      */
     public function extractWordPressNewsJson(array $emailContent, int $maxRetries = 3): ?array
     {
-        $emailJson = json_encode($emailContent, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $emailContentForAi = $this->sanitizeEmailContentForOpenAI($emailContent);
+        $emailJson = json_encode($emailContentForAi, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if (!is_string($emailJson) || trim($emailJson) === '') {
             return null;
         }
@@ -61,7 +63,7 @@ class OpenAIService
                 ? $basePrompt
                 : $this->buildWordPressRepairPrompt($emailJson, (string) $lastRaw, $lastErrors);
 
-            $raw = $this->callOpenAI($prompt, 6000, 0.0);
+            $raw = $this->callOpenAI($prompt, 6000, 0.0, ['type' => 'json_object']);
             $lastRaw = $raw;
 
             if ($raw === null) {
@@ -71,7 +73,12 @@ class OpenAIService
 
             $decoded = $this->decodeJsonObject($raw);
             if (!is_array($decoded)) {
-                $lastErrors = ['invalid_json'];
+                $trimmed = trim((string) $raw);
+                if (str_starts_with($trimmed, '{') && !str_ends_with($trimmed, '}')) {
+                    $lastErrors = ['truncated_json'];
+                } else {
+                    $lastErrors = ['invalid_json'];
+                }
                 continue;
             }
 
@@ -91,6 +98,126 @@ class OpenAIService
         return null;
     }
 
+    private function sanitizeEmailContentForOpenAI(array $emailContent): array
+    {
+        $sanitized = $emailContent;
+
+        // Attachments are processed in PHP (image selection/download). They only add noise/tokens for OpenAI.
+        if (array_key_exists('attachments', $sanitized)) {
+            unset($sanitized['attachments']);
+        }
+
+        if (array_key_exists('html_body', $sanitized) && is_string($sanitized['html_body'])) {
+            $html = $this->extractMessageBodyHtmlForOpenAI($sanitized['html_body']);
+            $sanitized['html_body'] = $this->stripImagesFromHtmlForOpenAI($html);
+        }
+
+        return $sanitized;
+    }
+
+    private function extractMessageBodyHtmlForOpenAI(string $html): string
+    {
+        $source = (string) $html;
+        if (trim($source) === '') {
+            return '';
+        }
+
+        // Fast path: if the container name isn't present at all, keep original.
+        // (Some emails use variations like id=messagebody without quotes or different casing.)
+        if (stripos($source, 'messagebody') === false) {
+            return $source;
+        }
+
+        if (!class_exists(\DOMDocument::class)) {
+            return $source;
+        }
+
+        $previousUseErrors = libxml_use_internal_errors(true);
+
+        try {
+            $dom = new \DOMDocument();
+            $wrapped = '<!doctype html><html><head><meta charset="utf-8"></head><body>' . $source . '</body></html>';
+
+            // phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged
+            if (!@$dom->loadHTML($wrapped, LIBXML_NOWARNING | LIBXML_NOERROR)) {
+                return $source;
+            }
+
+            $xpath = new \DOMXPath($dom);
+            $nodes = $xpath->query('//*[@id="messagebody"]');
+            if (!$nodes || $nodes->length < 1) {
+                return $source;
+            }
+
+            $messageBody = $nodes->item(0);
+            if (!$messageBody instanceof \DOMElement) {
+                return $source;
+            }
+
+            // Remove obvious attachment blocks inside messagebody (best-effort).
+            $attachmentNodes = $xpath->query(
+                './/*[contains(translate(@class, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "attachment")
+                    or contains(translate(@class, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "attachement")
+                    or contains(translate(@class, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "attachments")
+                    or contains(translate(@id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "attachment")
+                    or contains(translate(@id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "attachement")
+                    or contains(translate(@id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "attachments")
+                ]',
+                $messageBody
+            );
+
+            if ($attachmentNodes && $attachmentNodes->length > 0) {
+                for ($i = $attachmentNodes->length - 1; $i >= 0; $i--) {
+                    $n = $attachmentNodes->item($i);
+                    if ($n && $n->parentNode) {
+                        $n->parentNode->removeChild($n);
+                    }
+                }
+            }
+
+            $out = '';
+            foreach ($messageBody->childNodes as $child) {
+                $out .= $dom->saveHTML($child);
+            }
+
+            $out = trim($out);
+            if ($out === '') {
+                return $source;
+            }
+
+            // Extra token reduction: strip scripts/styles/comments from the extracted subtree.
+            $out = preg_replace('/<script\b[^>]*>.*?<\/script>/is', ' ', $out) ?? $out;
+            $out = preg_replace('/<style\b[^>]*>.*?<\/style>/is', ' ', $out) ?? $out;
+            $out = preg_replace('/<!--.*?-->/s', ' ', $out) ?? $out;
+
+            return $out;
+        } catch (\Throwable $_) {
+            return $source;
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previousUseErrors);
+        }
+    }
+
+    private function stripImagesFromHtmlForOpenAI(string $html): string
+    {
+        $text = (string) $html;
+        if (trim($text) === '') {
+            return '';
+        }
+
+        // Remove entire <picture> blocks (usually contain only responsive images).
+        $text = preg_replace('/<picture\b[^>]*>.*?<\/picture>/is', ' ', $text) ?? $text;
+
+        // Remove <img> tags.
+        $text = preg_replace('/<img\b[^>]*>/i', ' ', $text) ?? $text;
+
+        // Remove base64 image blobs that can explode token counts even outside <img> tags.
+        $text = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[a-z0-9\/+\r\n=]+/i', '[image-data-removed]', $text) ?? $text;
+
+        return $text;
+    }
+
     private function buildWordPressExtractionPrompt(string $emailJson): string
     {
         return "L'idée est de lire, analyser le contenu d'un mail en HTML et retourner les informations dans la description suivante pour être ajouter automatiquement dans wordpress.\n"
@@ -101,9 +228,11 @@ class OpenAIService
             . " - Après analyse, Fait une extraction du titre de la section française et met dans le JSON \"titleFR\" en texte brut sans HTML. Faire pareil pour la version EN mais a mettre dans \"titleEN\".\n"
             . " - si le \"titleFR\" dépasse les 62 caractères, reformule la phrase pour que ça soit moins de 62 caractères pour le SEO et met dans le json \"shorttitleFR\". Sinon, met directement le \"titleFR\" dans \"shorttitleFR\". Faire pareil pour la version EN mais a mettre dans la clé \"shorttitleEN\" du JSON.\n"
             . " - Fait un extraction du contenu de la version française tout en gardant les balises html pour la mise en page. (gras, saut de ligne, puce (ul, li, ...), italique, ...). Bien enlever tout ce qui ne concerne pas la news (actualité), mais garde la description de la société (A propos ...). Si la source de l'article n'est pas mentionné dans le contenu, ajoute à la fin ce format avec la source identifié \"Source: <le_nom_de_la_source>\" (la source peu être la société concerné ou aeromorning même si c'est mentionné). Encode-le dans la valeur de la clé FR du JSON. Si le \"titleFR\" dessus a dépassé les 62 caractères, modifie dans ce contenu HTML FR le titre complet \"titleFR\" pour que ça soit dans une balise h2, sinon l'enlever du contenu. Faire pareil pour la version EN mais a mettre dans le clé EN du JSON.\n"
+            . " - IMPORTANT POUR ÉVITER LES RÉPONSES COUPÉES: les champs HTML FR et EN doivent rester concis (max ~3500 caractères chacun). Supprime les répétitions et n'inclus pas de longues analyses.\n"
             . " - Génère un metadescription selon le contenu FR qui doit strictement faire entre 107 et 142 caractères et le mettre dans le JSON \"metadescriptionFR\". Faire pareil pour la version EN mais a mettre dans \"metadescriptionEN\" du JSON.\n"
             . " - Génère un FocusKeyPhrase depuis le contenu FR qui ne doit strictement pas avoir une virgule et le mettre dans \"focuskeyphraseFR\". Faire pareil pour la version EN mais a mettre dans \"focuskeyphraseEN\" du JSON.\n"
-            . " - Me retourner le JSON bien échappé car ça sera utilisé dans PHP.\n\n"
+            . " - Me retourner le JSON bien échappé car ça sera utilisé dans PHP.\n"
+            . " - Sortie: UNIQUEMENT le JSON brut, compact (pas d'indentation/retours à la ligne inutiles), sans Markdown.\n\n"
             . "IMPORTANT: Tu dois retourner uniquement le JSON brut (pas de Markdown, pas de ```). Le JSON doit être valide et parseable par json_decode en PHP. Les champs FR/EN contiennent du HTML avec de vraies balises (pas de &lt;p&gt;).\n\n"
             . "Voici le contenu du mail:\n\n"
             . $emailJson;
@@ -115,6 +244,7 @@ class OpenAIService
 
         return "Tu as retourné une réponse invalide/non conforme pour json_decode().\n"
             . "Corrige ta réponse et retourne UNIQUEMENT un JSON valide (pas de Markdown, pas de ```).\n"
+            . "Si ta réponse précédente était coupée/incomplète, raccourcis FR et EN (max ~3500 caractères chacun) et retourne un JSON compact.\n"
             . "Le JSON doit contenir exactement les clés suivantes: " . implode(', ', self::WP_JSON_KEYS) . ".\n"
             . "Erreurs à corriger: {$errorsText}.\n\n"
             . "RÉPONSE PRÉCÉDENTE (à corriger):\n"
@@ -143,6 +273,11 @@ class OpenAIService
             return $decoded;
         }
 
+        // If it looks like a cut-off JSON object, bail early (repair prompt will be used).
+        if (str_starts_with($raw, '{') && !str_ends_with($raw, '}')) {
+            return null;
+        }
+
         // Try to extract first JSON object.
         if (preg_match('/\{.*\}/s', $raw, $matches) === 1) {
             $decoded = json_decode($matches[0], true);
@@ -161,6 +296,18 @@ class OpenAIService
         foreach (self::WP_JSON_KEYS as $key) {
             if (!array_key_exists($key, $payload)) {
                 $errors[] = 'missing_' . $key;
+            }
+        }
+
+        // Prevent accepting empty SEO fields (this was causing Yoast meta to be updated with blank strings).
+        foreach (['metadescriptionFR', 'metadescriptionEN', 'focuskeyphraseFR', 'focuskeyphraseEN'] as $key) {
+            if (!array_key_exists($key, $payload)) {
+                continue;
+            }
+
+            $value = $payload[$key];
+            if (!is_string($value) || trim($value) === '') {
+                $errors[] = 'empty_' . $key;
             }
         }
 
@@ -1498,7 +1645,12 @@ EXEMPLE VALIDE :
     /**
      * Call OpenAI API
      */
-    private function callOpenAI(string $prompt, int $maxTokens = 500, float $temperature = 0.3): ?string
+    private function callOpenAI(
+        string $prompt,
+        int $maxTokens = 500,
+        float $temperature = 0.3,
+        ?array $responseFormat = null
+    ): ?string
     {
         $model = (string) env('OPENAI_MODEL', 'gpt-5-mini');
         $fallbackModel = trim((string) env('OPENAI_FALLBACK_MODEL', 'gpt-4o-mini'));
@@ -1524,7 +1676,7 @@ EXEMPLE VALIDE :
             $maxTokens = max($maxTokens, (int) env('OPENAI_MIN_COMPLETION_TOKENS', 256));
         }
 
-        $payload = $this->buildChatPayload($model, $prompt, $maxTokens, $temperature);
+        $payload = $this->buildChatPayload($model, $prompt, $maxTokens, $temperature, $responseFormat);
 
         $attempts = 0;
         while ($attempts < 2) {
@@ -1576,6 +1728,22 @@ EXEMPLE VALIDE :
                 }
 
                 if ($contentText !== '') {
+                    if (config('app.debug')) {
+                        $finishReason = null;
+                        if (is_object($choice) && isset($choice->finishReason)) {
+                            $finishReason = $choice->finishReason;
+                        } elseif (is_object($choice) && isset($choice->finish_reason)) {
+                            $finishReason = $choice->finish_reason;
+                        } elseif (is_array($choice) && isset($choice['finish_reason'])) {
+                            $finishReason = $choice['finish_reason'];
+                        }
+
+                        Log::debug('OpenAI response', [
+                            'model' => $model,
+                            'finish_reason' => $finishReason,
+                            'output_chars' => mb_strlen($contentText),
+                        ]);
+                    }
                     return $contentText;
                 }
 
@@ -1593,7 +1761,7 @@ EXEMPLE VALIDE :
                         ]);
                     }
 
-                    $fallbackPayload = $this->buildChatPayload($fallbackModel, $prompt, $maxTokens, $temperature);
+                    $fallbackPayload = $this->buildChatPayload($fallbackModel, $prompt, $maxTokens, $temperature, $responseFormat);
                     $fallbackResponse = $this->client->chat()->create($fallbackPayload);
                     $fallbackChoice = $fallbackResponse->choices[0] ?? null;
                     $fallbackMessage = $fallbackChoice?->message ?? null;
@@ -1608,6 +1776,16 @@ EXEMPLE VALIDE :
                 $message = $e->getMessage();
                 Log::error('OpenAI API error: ' . $message);
 
+                // Some models/APIs don't support response_format; retry once without it.
+                if (
+                    $responseFormat !== null
+                    && preg_match('/response_format|unknown parameter|unrecognized request argument|unsupported/i', $message) === 1
+                ) {
+                    $responseFormat = null;
+                    $payload = $this->buildChatPayload($model, $prompt, $maxTokens, $temperature, null);
+                    continue;
+                }
+
                 // Retry once on transient/timeout-like failures.
                 if ($attempts < 2 && preg_match('/timeout|timed out|cURL error 28/i', $message) === 1) {
                     continue;
@@ -1620,7 +1798,13 @@ EXEMPLE VALIDE :
         return null;
     }
 
-    private function buildChatPayload(string $model, string $prompt, int $maxTokens, float $temperature): array
+    private function buildChatPayload(
+        string $model,
+        string $prompt,
+        int $maxTokens,
+        float $temperature,
+        ?array $responseFormat = null
+    ): array
     {
         $payload = [
             'model' => $model,
@@ -1631,6 +1815,10 @@ EXEMPLE VALIDE :
                 ],
             ],
         ];
+
+        if (is_array($responseFormat)) {
+            $payload['response_format'] = $responseFormat;
+        }
 
         // Some models only support the default temperature. For those, omit the parameter.
         if (!$this->shouldOmitTemperature($model)) {
