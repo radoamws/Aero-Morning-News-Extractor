@@ -579,8 +579,8 @@ EXEMPLE VALIDE :
         $excerpt = mb_substr($plainContent, 0, 4000);
 
         $prompt = "You are filtering incoming emails for an aviation news workflow.\n"
-            . "Decide whether the content below contains a real aviation, aerospace, airline, airport, aircraft, defense aviation, air transport, or space news article that is relevant for publication.\n"
-            . "Reject emails that are mainly signatures, admin exchanges, personal messages, legal notices, generic business messages, marketing unrelated to aviation, or content without a real publishable aviation news story.\n"
+            . "Decide whether the content below contains a real aviation, aerospace, airline, airport, aircraft, defense aviation, air transport, drone, aviation industry, cargo, cyber security, evtol, innovation, Artificial Intelligence, naval, satellite or space news article that is relevant for publication.\n"
+            . "Reject emails that are mainly signatures, admin exchanges, personal messages, legal notices, generic business messages, marketing unrelated to aviation or drone, or content without a real publishable aviation news story.\n"
             . "Return only one word: YES or NO.\n\n"
             . $excerpt;
 

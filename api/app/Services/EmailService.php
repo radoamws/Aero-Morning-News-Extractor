@@ -308,10 +308,14 @@ class EmailService
      */
     public function extractEmailContent(IncomingMail $mail): array
     {
+        $subject = $this->repairEncodingArtifacts((string) ($mail->subject ?? ''));
+        $htmlBody = $this->repairEncodingArtifacts((string) ($mail->textHtml ?? ''));
+        $textBody = $this->repairEncodingArtifacts((string) ($mail->textPlain ?? ''));
+
         $content = [
-            'subject' => $mail->subject ?? '',
-            'html_body' => $mail->textHtml ?? '',
-            'text_body' => $mail->textPlain ?? '',
+            'subject' => $subject,
+            'html_body' => $htmlBody,
+            'text_body' => $textBody,
             'attachments' => [],
             'message_id' => $mail->messageId ?? '',
             'from' => $mail->fromAddress ?? ''
@@ -334,6 +338,80 @@ class EmailService
         }
 
         return $content;
+    }
+
+    private function repairEncodingArtifacts(string $value): string
+    {
+        $value = (string) $value;
+        if ($value === '') {
+            return '';
+        }
+
+        // Ensure the string is valid UTF-8 before running Unicode regexes.
+        if (function_exists('mb_check_encoding') && !mb_check_encoding($value, 'UTF-8')) {
+            if (function_exists('mb_convert_encoding')) {
+                $converted = @mb_convert_encoding($value, 'UTF-8', 'UTF-8,Windows-1252,ISO-8859-1');
+                if (is_string($converted) && $converted !== '' && mb_check_encoding($converted, 'UTF-8')) {
+                    $value = $converted;
+                }
+            }
+        }
+
+        // Some sources include ASCII control separators (e.g. \x13) between fields.
+        $value = str_replace("\x13", ' - ', $value);
+
+        // Replace other control chars (keep newlines/tabs).
+        $value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', ' ', $value) ?? $value;
+
+        // Repair cases where quoted-printable bytes were stripped of '=' and left as hex, e.g. d=E9 -> dE9 -> de9.
+        // We only replace when the 2-hex sequence is adjacent to letters to avoid touching IDs (A220) or URLs (%e9).
+        $map = [
+            // lower
+            'e0' => 'à',
+            'e2' => 'â',
+            'e7' => 'ç',
+            'e8' => 'è',
+            'e9' => 'é',
+            'ea' => 'ê',
+            'eb' => 'ë',
+            'ee' => 'î',
+            'ef' => 'ï',
+            'f4' => 'ô',
+            'f9' => 'ù',
+            'fb' => 'û',
+            'fc' => 'ü',
+            'a0' => ' ',
+            // upper
+            'c0' => 'À',
+            'c2' => 'Â',
+            'c7' => 'Ç',
+            'c8' => 'È',
+            'c9' => 'É',
+            'ca' => 'Ê',
+            'cb' => 'Ë',
+            'ce' => 'Î',
+            'cf' => 'Ï',
+            'd4' => 'Ô',
+            'd9' => 'Ù',
+            'db' => 'Û',
+            'dc' => 'Ü',
+            // Heuristic: some feeds/emails yield b9 in place of apostrophes.
+            'b9' => '’',
+        ];
+
+        $value = preg_replace_callback(
+            '/(?<=\p{L})([0-9a-fA-F]{2})(?=(?:\p{L}|\p{Z}|\p{P}|$))/u',
+            static function (array $m) use ($map): string {
+                $hex = strtolower($m[1]);
+                return $map[$hex] ?? $m[1];
+            },
+            $value
+        ) ?? $value;
+
+        // Collapse spaces introduced by control-char cleanup.
+        $value = preg_replace('/[ \t]{2,}/u', ' ', $value) ?? $value;
+
+        return trim($value);
     }
 
     /**
