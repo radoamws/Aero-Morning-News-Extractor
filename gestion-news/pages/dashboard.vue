@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useNewsStore } from "~/stores/news";
 
 
@@ -22,7 +22,8 @@ const {
   isProcessing,
   processProgress,
   processLogs,
-  processLogsLoading
+  processLogsLoading,
+  seoRepushStatus
 } = storeToRefs(newsStore);
 
 const wpUser = ref("");
@@ -31,6 +32,9 @@ const singleStatusTarget = ref<0 | 1 | 2>(0);
 const bulkStatusTarget = ref<0 | 1 | 2>(0);
 const bulkMode = ref<"selected" | "filtered" | "all">("selected");
 const selectedSingleId = ref<number | null>(null);
+const seoRepushLimit = ref(200);
+const seoRepushResumeAfterId = ref("");
+const seoRepushResumeTouched = ref(false);
 
 const setPage = async (page: number) => {
   filters.value.page = page;
@@ -116,8 +120,39 @@ const runBulkPost = async () => {
   await newsStore.postBulkToWordPress(bulkMode.value, wpUser.value, wpPassword.value);
 };
 
+const runSeoRepush = async () => {
+  const parsedResumeAfterId = Number.parseInt(seoRepushResumeAfterId.value, 10);
+  await newsStore.runRepushSeoMeta(
+    seoRepushLimit.value,
+    Number.isFinite(parsedResumeAfterId) && parsedResumeAfterId > 0 ? parsedResumeAfterId : null
+  );
+};
+
+const resetSeoRepushResume = () => {
+  seoRepushResumeAfterId.value = "";
+  seoRepushResumeTouched.value = false;
+};
+
+watch(
+  () => seoRepushStatus.value?.checkpoint?.next_resume_after_news_id,
+  (nextValue) => {
+    if (seoRepushResumeTouched.value && seoRepushResumeAfterId.value.trim() !== "") {
+      return;
+    }
+
+    seoRepushResumeAfterId.value = nextValue ? String(nextValue) : "";
+    seoRepushResumeTouched.value = false;
+  },
+  { immediate: true }
+);
+
 onMounted(async () => {
-  await Promise.all([newsStore.fetchNews(), newsStore.fetchStats(), newsStore.fetchProcessLogs()]);
+  await Promise.all([
+    newsStore.fetchNews(),
+    newsStore.fetchStats(),
+    newsStore.fetchProcessLogs(),
+    newsStore.fetchSeoRepushStatus()
+  ]);
 });
 </script>
 
@@ -137,8 +172,49 @@ onMounted(async () => {
         <button class="btn btn-primary" :disabled="actionLoading" @click="newsStore.runPublishPending()">
           Publish Pending News
         </button>
+        <label>
+          <span>Batch SEO</span>
+          <input v-model.number="seoRepushLimit" type="number" min="1" max="1000" style="width: 120px;" />
+        </label>
+        <label>
+          <span>Reprendre apres ID</span>
+          <input
+            v-model="seoRepushResumeAfterId"
+            type="text"
+            inputmode="numeric"
+            placeholder="ex: 413"
+            style="width: 140px;"
+            @input="seoRepushResumeTouched = true"
+          />
+        </label>
+        <button class="btn btn-ghost" type="button" :disabled="actionLoading" @click="resetSeoRepushResume">
+          Reset
+        </button>
+        <button class="btn btn-primary" :disabled="actionLoading" @click="runSeoRepush">
+          Repush SEO Meta
+        </button>
         <button class="btn btn-ghost" :disabled="loading" @click="newsStore.fetchNews()">Rafraichir liste</button>
         <button class="btn btn-ghost" @click="newsStore.fetchStats()">Rafraichir stats</button>
+        <button class="btn btn-ghost" :disabled="actionLoading" @click="newsStore.fetchSeoRepushStatus()">
+          Rafraichir statut SEO
+        </button>
+      </div>
+
+      <div class="panel" style="margin-top: 16px;">
+        <h3 style="margin: 0 0 8px;">Statut repush SEO</h3>
+        <p class="muted" v-if="!seoRepushStatus">Aucun statut disponible.</p>
+        <template v-else>
+          <p class="muted" style="margin: 0 0 6px;">
+            Dernier run: {{ seoRepushStatus.latest_run?.status || '-' }}
+            | debut: {{ seoRepushStatus.latest_run?.started_at ? new Date(seoRepushStatus.latest_run.started_at).toLocaleString('fr-FR') : '-' }}
+          </p>
+          <p class="muted" style="margin: 0 0 6px;">
+            Checkpoint: {{ seoRepushStatus.checkpoint?.has_checkpoint ? 'oui' : 'non' }}
+          </p>
+          <p class="muted" style="margin: 0;">
+            Le champ "Reprendre apres ID" est pre-rempli avec la reprise detectee et tu peux le modifier avant de lancer.
+          </p>
+        </template>
       </div>
     </article>
 

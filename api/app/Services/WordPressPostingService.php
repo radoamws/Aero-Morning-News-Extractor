@@ -70,6 +70,7 @@ class WordPressPostingService
                 'content' => $news->content,
                 'excerpt' => $news->metadescription,
                 'status'  => 'publish',
+                'meta'    => $this->buildSeoMetaPayload($news),
             ];
 
             if ($imageId !== null) {
@@ -122,6 +123,54 @@ class WordPressPostingService
                 'class' => get_class($e),
             ];
             return ['success' => false, 'wp_post_id' => null, 'error' => $e->getMessage(), 'details' => $details];
+        }
+    }
+
+    /**
+     * Repush only SEO metadata (meta description + focus keyphrase)
+     * to an existing WordPress post resolved from the local news title.
+     */
+    public function repushSeoMetaForNews(News $news): array
+    {
+        try {
+            $wpPostId = $this->findWordPressPostIdByTitle($news->title);
+            if ($wpPostId === null) {
+                return [
+                    'success' => false,
+                    'wp_post_id' => null,
+                    'error' => 'wordpress_post_not_found',
+                    'details' => [
+                        'title' => $news->title,
+                        'lang' => $news->lang,
+                    ],
+                ];
+            }
+
+            $yoast = $this->updateYoastMetaDetailed($wpPostId, $news);
+            $httpStatus = $yoast['http_status'] ?? null;
+            $isOk = is_int($httpStatus) && $httpStatus >= 200 && $httpStatus < 300;
+
+            return [
+                'success' => $isOk,
+                'wp_post_id' => $wpPostId,
+                'error' => $isOk ? null : 'yoast_meta_update_failed',
+                'details' => [
+                    'yoast_meta' => $yoast,
+                ],
+            ];
+        } catch (\Throwable $e) {
+            Log::warning("Error repushing SEO meta for news #{$news->id}: " . $e->getMessage());
+            return [
+                'success' => false,
+                'wp_post_id' => null,
+                'error' => $e->getMessage(),
+                'details' => [
+                    'exception' => [
+                        'message' => $e->getMessage(),
+                        'class' => get_class($e),
+                    ],
+                ],
+            ];
         }
     }
 
@@ -208,10 +257,7 @@ class WordPressPostingService
                 ])
                 ->timeout(15)
                 ->post("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
-                    'meta' => [
-                        '_yoast_wpseo_metadesc' => $news->metadescription,
-                        '_yoast_wpseo_focuskw'  => $news->focuskeyphrase,
-                    ],
+                    'meta' => $this->buildSeoMetaPayload($news),
                 ]);
 
             if (!$response->successful()) {
@@ -252,10 +298,7 @@ class WordPressPostingService
                 ])
                 ->timeout(15)
                 ->post("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
-                    'meta' => [
-                        '_yoast_wpseo_metadesc' => (string) ($news->metadescription ?? ''),
-                        '_yoast_wpseo_focuskw'  => (string) ($news->focuskeyphrase ?? ''),
-                    ],
+                    'meta' => $this->buildSeoMetaPayload($news),
                 ]);
 
             if (!$response->successful()) {
@@ -303,6 +346,64 @@ class WordPressPostingService
         return mb_strlen($body) > $max ? (mb_substr($body, 0, $max) . '...<truncated>') : $body;
     }
 
+    /**
+     * Build a WordPress REST meta payload that covers the supported SEO plugins.
+     */
+    private function buildSeoMetaPayload(News $news): array
+    {
+        $metaDescription = (string) ($news->metadescription ?? '');
+        $focusKeyphrase = (string) ($news->focuskeyphrase ?? '');
+
+        return [
+            '_yoast_wpseo_metadesc' => $metaDescription,
+            '_yoast_wpseo_focuskw' => $focusKeyphrase,
+            'rank_math_description' => $metaDescription,
+            'rank_math_focus_keyword' => $focusKeyphrase,
+        ];
+    }
+
+    private function findWordPressPostIdByTitle(string $title): ?int
+    {
+        $normalizedTitle = trim(html_entity_decode($title, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        if ($normalizedTitle === '') {
+            return null;
+        }
+
+        $response = Http::withHeaders([
+                'Authorization' => 'Basic ' . $this->authToken,
+            ])
+            ->timeout(20)
+            ->get("{$this->wpUrl}/wp-json/wp/v2/posts", [
+                'search' => $normalizedTitle,
+                'per_page' => 20,
+                'orderby' => 'date',
+                'order' => 'desc',
+                'status' => 'publish',
+            ]);
+
+        if (!$response->successful()) {
+            Log::warning("Unable to search WordPress post by title [{$response->status()}]");
+            return null;
+        }
+
+        $posts = $response->json();
+        if (!is_array($posts) || empty($posts)) {
+            return null;
+        }
+
+        foreach ($posts as $post) {
+            $rendered = (string) data_get($post, 'title.rendered', '');
+            $candidate = trim(strip_tags(html_entity_decode($rendered, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+
+            if (mb_strtolower($candidate) === mb_strtolower($normalizedTitle)) {
+                return (int) ($post['id'] ?? 0) ?: null;
+            }
+        }
+
+        $fallbackId = (int) data_get($posts, '0.id', 0);
+        return $fallbackId > 0 ? $fallbackId : null;
+    }
+
     // -------------------------------------------------------------------------
     // Legacy methods kept for the manual posting controller endpoints.
     // -------------------------------------------------------------------------
@@ -324,6 +425,7 @@ class WordPressPostingService
                 'content' => $news->content,
                 'excerpt' => $news->metadescription,
                 'status' => 'publish',
+                'meta' => $this->buildSeoMetaPayload($news),
             ];
 
             // Add categories
@@ -418,6 +520,7 @@ class WordPressPostingService
                 'title' => $news->title,
                 'content' => $news->content,
                 'excerpt' => $news->metadescription,
+                'meta' => $this->buildSeoMetaPayload($news),
             ];
 
             if (!empty($news->categories)) {

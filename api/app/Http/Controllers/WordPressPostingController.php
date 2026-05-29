@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\News;
+use App\Models\ProcessLog;
 use App\Services\ProcessLogService;
 use App\Services\WordPressPostingService;
 use Illuminate\Http\JsonResponse;
@@ -397,6 +398,241 @@ class WordPressPostingController extends Controller
                 'message' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Manually repush SEO metadata for all news in descending ID order.
+     * Uses a checkpoint so the next launch can resume after interruptions.
+     */
+    public function repushAllSeoMeta(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'limit' => 'nullable|integer|min:1|max:1000',
+            'resume_after_news_id' => 'nullable|integer|min:1',
+        ]);
+
+        $limit = (int) ($validated['limit'] ?? 200);
+        $requestedResumeAfterId = isset($validated['resume_after_news_id'])
+            ? (int) $validated['resume_after_news_id']
+            : null;
+
+        $processLogService = app(ProcessLogService::class);
+        $checkpoint = $this->getSeoRepushCheckpoint();
+        $resumeAfterId = $requestedResumeAfterId
+            ?? ($checkpoint['next_resume_after_news_id'] ?? null);
+
+        $processLog = $processLogService->startRun('repush_seo_meta', [
+            'source' => 'api',
+            'details' => [
+                'resume_after_news_id' => $resumeAfterId,
+                'checkpoint_log_id' => $checkpoint['log_id'] ?? null,
+                'limit' => $limit,
+            ],
+        ]);
+
+        $startedAt = microtime(true);
+        $httpMaxSeconds = (int) env('SEO_META_REPUSH_HTTP_MAX_SECONDS', 120);
+        if ($httpMaxSeconds <= 0) {
+            @ini_set('max_execution_time', '0');
+            @set_time_limit(0);
+            $deadline = PHP_FLOAT_MAX;
+        } else {
+            @ini_set('max_execution_time', (string) $httpMaxSeconds);
+            @set_time_limit($httpMaxSeconds);
+            $deadline = $startedAt + max(1, $httpMaxSeconds - 10);
+        }
+
+        $query = News::query()->orderByDesc('id');
+        if (is_int($resumeAfterId) && $resumeAfterId > 0) {
+            $query->where('id', '<', $resumeAfterId);
+        }
+
+        $targets = $query->limit($limit)->get();
+
+        if ($targets->isEmpty()) {
+            $details = [
+                'processed' => 0,
+                'updated' => 0,
+                'not_found' => 0,
+                'failed' => 0,
+                'next_resume_after_news_id' => null,
+                'has_more' => false,
+                'resume_after_news_id' => $resumeAfterId,
+            ];
+
+            $processLogService->finishRun(
+                $processLog,
+                ProcessLogService::STATUS_SUCCESS,
+                $details,
+                'No news left to repush SEO metadata.'
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'No news left to repush SEO metadata.',
+                'data' => $details,
+            ]);
+        }
+
+        $results = [
+            'processed' => 0,
+            'updated' => 0,
+            'not_found' => 0,
+            'failed' => 0,
+            'items' => [],
+        ];
+
+        $abortedDueToTimeBudget = false;
+        $lastProcessedNewsId = null;
+        $lastCheckpointNewsId = null;
+
+        foreach ($targets as $news) {
+            if (microtime(true) >= $deadline) {
+                $abortedDueToTimeBudget = true;
+                break;
+            }
+
+            $service = new WordPressPostingService($news->lang);
+            $repushResult = $service->repushSeoMetaForNews($news);
+
+            $results['processed']++;
+            $lastProcessedNewsId = (int) $news->id;
+
+            if (($repushResult['success'] ?? false) === true) {
+                $results['updated']++;
+                $lastCheckpointNewsId = (int) $news->id;
+            } elseif (($repushResult['error'] ?? null) === 'wordpress_post_not_found') {
+                $results['not_found']++;
+                // Consider not_found as processed for resume progression.
+                $lastCheckpointNewsId = (int) $news->id;
+            } else {
+                $results['failed']++;
+            }
+
+            $results['items'][] = [
+                'news_id' => $news->id,
+                'lang' => $news->lang,
+                'title' => $news->title,
+                'wp_post_id' => $repushResult['wp_post_id'] ?? null,
+                'success' => (bool) ($repushResult['success'] ?? false),
+                'error' => $repushResult['error'] ?? null,
+            ];
+        }
+
+        $hasMore = false;
+        if (is_int($lastCheckpointNewsId) && $lastCheckpointNewsId > 0) {
+            $hasMore = News::where('id', '<', $lastCheckpointNewsId)->exists();
+        } elseif (is_int($lastProcessedNewsId) && $lastProcessedNewsId > 0) {
+            // We processed items but none are checkpoint-safe (all failed): keep resumable state.
+            $hasMore = true;
+        }
+
+        $nextResumeAfterNewsId = null;
+        if ($hasMore || $abortedDueToTimeBudget) {
+            if (is_int($lastCheckpointNewsId) && $lastCheckpointNewsId > 0) {
+                $nextResumeAfterNewsId = $lastCheckpointNewsId;
+            } elseif (is_int($resumeAfterId) && $resumeAfterId > 0) {
+                $nextResumeAfterNewsId = $resumeAfterId;
+            }
+        }
+
+        $status = ProcessLogService::STATUS_SUCCESS;
+        if ($results['failed'] > 0 || $hasMore || $abortedDueToTimeBudget) {
+            $status = ProcessLogService::STATUS_PARTIAL;
+        }
+
+        $details = [
+            'processed' => $results['processed'],
+            'updated' => $results['updated'],
+            'not_found' => $results['not_found'],
+            'failed' => $results['failed'],
+            'aborted_due_to_time_budget' => $abortedDueToTimeBudget,
+            'next_resume_after_news_id' => $nextResumeAfterNewsId,
+            'resume_after_news_id' => $resumeAfterId,
+            'has_more' => $hasMore,
+            'limit' => $limit,
+            'items' => $results['items'],
+        ];
+
+        $processLogService->finishRun(
+            $processLog,
+            $status,
+            $details,
+            $status === ProcessLogService::STATUS_SUCCESS
+                ? 'SEO metadata repush completed.'
+                : 'SEO metadata repush partially completed.'
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => $status === ProcessLogService::STATUS_SUCCESS
+                ? 'SEO metadata repush completed.'
+                : 'SEO metadata repush partially completed. You can resume from checkpoint.',
+            'data' => $details,
+        ]);
+    }
+
+    /**
+     * Get latest repush status and resumable checkpoint.
+     */
+    public function repushSeoMetaStatus(): JsonResponse
+    {
+        $latest = ProcessLog::query()
+            ->where('process_type', 'repush_seo_meta')
+            ->orderByDesc('id')
+            ->first();
+
+        $checkpoint = $this->getSeoRepushCheckpoint();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'latest_run' => $latest,
+                'checkpoint' => $checkpoint,
+            ],
+        ]);
+    }
+
+    private function getSeoRepushCheckpoint(): array
+    {
+        $log = ProcessLog::query()
+            ->where('process_type', 'repush_seo_meta')
+            ->whereIn('status', [ProcessLogService::STATUS_RUNNING, ProcessLogService::STATUS_PARTIAL])
+            ->orderByDesc('id')
+            ->first();
+
+        if (!$log) {
+            return [
+                'has_checkpoint' => false,
+                'log_id' => null,
+                'status' => null,
+                'next_resume_after_news_id' => null,
+                'updated_at' => null,
+            ];
+        }
+
+        $details = $this->decodeProcessLogDetails($log->details);
+        $nextResume = isset($details['next_resume_after_news_id'])
+            ? (int) $details['next_resume_after_news_id']
+            : null;
+
+        return [
+            'has_checkpoint' => $nextResume !== null,
+            'log_id' => $log->id,
+            'status' => $log->status,
+            'next_resume_after_news_id' => $nextResume,
+            'updated_at' => optional($log->updated_at)->toIso8601String(),
+        ];
+    }
+
+    private function decodeProcessLogDetails(?string $details): array
+    {
+        if (!is_string($details) || trim($details) === '') {
+            return [];
+        }
+
+        $decoded = json_decode($details, true);
+        return is_array($decoded) ? $decoded : [];
     }
 
     // -------------------------------------------------------------------------

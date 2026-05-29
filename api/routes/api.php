@@ -30,6 +30,8 @@ Route::middleware('auth:sanctum')->group(function () {
 	Route::post('/news/{id}/post-to-wordpress', [WordPressPostingController::class, 'postNews']);
 	Route::post('/news/bulk-post-to-wordpress', [WordPressPostingController::class, 'bulkPostNews']);
 	Route::post('/publish-pending', [WordPressPostingController::class, 'publishPendingNews']);
+	Route::post('/repush-seo-meta', [WordPressPostingController::class, 'repushAllSeoMeta']);
+	Route::get('/repush-seo-meta/status', [WordPressPostingController::class, 'repushSeoMetaStatus']);
 	Route::get('/news/{id}/preview', [WordPressPostingController::class, 'previewNews']);
 
 	// Statistics
