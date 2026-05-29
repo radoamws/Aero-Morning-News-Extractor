@@ -64,33 +64,55 @@ class WordPressPostingService
                 ];
             }
 
-            // Step 2 — create post
-            $postData = [
-                'title'   => $news->title,
-                'content' => $news->content,
-                'excerpt' => $news->metadescription,
-                'status'  => 'publish',
-                'meta'    => $this->buildSeoMetaPayload($news),
+            // Step 2 — create post using multipart/form-data
+            // (same approach as the previously working Make.com modules).
+            $multipart = [
+                [
+                    'name' => 'title',
+                    'contents' => (string) $news->title,
+                ],
+                [
+                    'name' => 'content',
+                    'contents' => (string) $news->content,
+                ],
+                [
+                    'name' => 'excerpt',
+                    'contents' => (string) ($news->metadescription ?? ''),
+                ],
+                [
+                    'name' => 'status',
+                    'contents' => 'publish',
+                ],
             ];
 
             if ($imageId !== null) {
-                $postData['featured_media'] = $imageId;
+                $multipart[] = [
+                    'name' => 'featured_media',
+                    'contents' => (string) $imageId,
+                ];
             }
 
             if (!empty($news->categories)) {
-                $postData['categories'] = $news->getCategoriesArray();
+                $multipart[] = [
+                    'name' => 'categories',
+                    'contents' => (string) $news->categories,
+                ];
             }
 
             if (!empty($news->tags)) {
-                $postData['tags'] = $news->getTagsArray();
+                $multipart[] = [
+                    'name' => 'tags',
+                    'contents' => (string) $news->tags,
+                ];
             }
 
             $response = Http::withHeaders([
                     'Authorization' => 'Basic ' . $this->authToken,
-                    'Content-Type'  => 'application/json',
                 ])
                 ->timeout(30)
-                ->post("{$this->wpUrl}/wp-json/wp/v2/posts", $postData);
+                ->send('POST', "{$this->wpUrl}/wp-json/wp/v2/posts", [
+                    'multipart' => $multipart,
+                ]);
 
             $details['steps']['post_create'] = [
                 'attempted' => true,
@@ -357,8 +379,6 @@ class WordPressPostingService
         return [
             '_yoast_wpseo_metadesc' => $metaDescription,
             '_yoast_wpseo_focuskw' => $focusKeyphrase,
-            'rank_math_description' => $metaDescription,
-            'rank_math_focus_keyword' => $focusKeyphrase,
         ];
     }
 
