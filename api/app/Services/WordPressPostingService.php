@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\News;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class WordPressPostingService
 {
@@ -273,14 +274,17 @@ class WordPressPostingService
     private function updateYoastMetaDetailed(int $wpPostId, News $news): array
     {
         try {
+            $metaPayload = $this->buildSeoMetaPayload($news);
             $response = Http::withHeaders([
                     'Authorization' => 'Basic ' . $this->authToken,
                     'Content-Type'  => 'application/json',
                 ])
                 ->timeout(15)
-                ->post("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
-                    'meta' => $this->buildSeoMetaPayload($news),
-                ]);
+                ->withBody(
+                    json_encode($metaPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                    'application/json'
+                )
+                ->post($this->buildYoastEndpointUrl($wpPostId));
 
             if (!$response->successful()) {
                 Log::warning("Yoast meta update failed for WP post {$wpPostId} [{$response->status()}]");
@@ -314,14 +318,17 @@ class WordPressPostingService
     private function updateYoastMetaBasicAuthDetailed(int $wpPostId, News $news, string $username, string $password): array
     {
         try {
+            $metaPayload = $this->buildSeoMetaPayload($news);
             $response = Http::withBasicAuth($username, $password)
                 ->withHeaders([
                     'Content-Type' => 'application/json',
                 ])
                 ->timeout(15)
-                ->post("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
-                    'meta' => $this->buildSeoMetaPayload($news),
-                ]);
+                ->withBody(
+                    json_encode($metaPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                    'application/json'
+                )
+                ->post($this->buildYoastEndpointUrl($wpPostId));
 
             if (!$response->successful()) {
                 Log::warning("Yoast meta update (basic auth) failed for WP post {$wpPostId} [{$response->status()}]");
@@ -377,9 +384,14 @@ class WordPressPostingService
         $focusKeyphrase = (string) ($news->focuskeyphrase ?? '');
 
         return [
-            '_yoast_wpseo_metadesc' => $metaDescription,
-            '_yoast_wpseo_focuskw' => $focusKeyphrase,
+            'metadesc' => $metaDescription,
+            'focuskw' => $focusKeyphrase,
         ];
+    }
+
+    private function buildYoastEndpointUrl(int $wpPostId): string
+    {
+        return rtrim($this->wpUrl, '/') . '/wp-json/aeromorning/v1/yoast/' . $wpPostId;
     }
 
     private function findWordPressPostIdByTitle(string $title): ?int
@@ -387,6 +399,28 @@ class WordPressPostingService
         $normalizedTitle = trim(html_entity_decode($title, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
         if ($normalizedTitle === '') {
             return null;
+        }
+
+        $slug = Str::slug($normalizedTitle);
+        if ($slug !== '') {
+            $slugResponse = Http::withHeaders([
+                    'Authorization' => 'Basic ' . $this->authToken,
+                ])
+                ->timeout(20)
+                ->get("{$this->wpUrl}/wp-json/wp/v2/posts", [
+                    'slug' => $slug,
+                    'per_page' => 5,
+                ]);
+
+            if ($slugResponse->successful()) {
+                $slugPosts = $slugResponse->json();
+                if (is_array($slugPosts) && !empty($slugPosts)) {
+                    $id = (int) data_get($slugPosts, '0.id', 0);
+                    if ($id > 0) {
+                        return $id;
+                    }
+                }
+            }
         }
 
         $response = Http::withHeaders([
@@ -415,13 +449,20 @@ class WordPressPostingService
             $rendered = (string) data_get($post, 'title.rendered', '');
             $candidate = trim(strip_tags(html_entity_decode($rendered, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
 
-            if (mb_strtolower($candidate) === mb_strtolower($normalizedTitle)) {
+            if ($this->normalizeTitleForComparison($candidate) === $this->normalizeTitleForComparison($normalizedTitle)) {
                 return (int) ($post['id'] ?? 0) ?: null;
             }
         }
 
-        $fallbackId = (int) data_get($posts, '0.id', 0);
-        return $fallbackId > 0 ? $fallbackId : null;
+        return null;
+    }
+
+    private function normalizeTitleForComparison(string $value): string
+    {
+        $normalized = mb_strtolower(trim($value));
+        $normalized = str_replace(["\u{2019}", "`", "´", "’"], "'", $normalized);
+        $normalized = preg_replace('/\s+/u', ' ', $normalized) ?? $normalized;
+        return $normalized;
     }
 
     // -------------------------------------------------------------------------
