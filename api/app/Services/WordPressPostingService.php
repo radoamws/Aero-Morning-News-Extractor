@@ -11,16 +11,22 @@ class WordPressPostingService
 {
     private string $wpUrl;
     private string $authToken;
+    private string $yoastAuthToken;
+    private bool $allowTitleFallback;
 
     public function __construct(string $lang = 'FR')
     {
         if ($lang === 'EN') {
             $this->wpUrl    = rtrim(config('services.wordpress.en_url', env('WORDPRESS_EN_URL')), '/');
             $this->authToken = config('services.wordpress.auth_en', env('WORDPRESS_AUTH_EN', ''));
+            $this->yoastAuthToken = config('services.wordpress.yoast_auth_en', env('WORDPRESS_AUTH_EN', ''));
         } else {
             $this->wpUrl    = rtrim(config('services.wordpress.fr_url', env('WORDPRESS_FR_URL')), '/');
             $this->authToken = config('services.wordpress.auth_fr', env('WORDPRESS_AUTH_FR', ''));
+            $this->yoastAuthToken = config('services.wordpress.yoast_auth_fr', env('WORDPRESS_AUTH_FR', ''));
         }
+
+        $this->allowTitleFallback = (bool) config('services.wordpress.allow_title_fallback', false);
     }
 
     // -------------------------------------------------------------------------
@@ -133,6 +139,7 @@ class WordPressPostingService
 
             $wpPostId = (int) $response->json('id');
             Log::info("News #{$news->id} published to WordPress — WP post ID: {$wpPostId}");
+            $this->persistWordPressPostMapping($news, $wpPostId);
 
             // Step 3 — update Yoast SEO meta
             $details['steps']['yoast_meta'] = $this->updateYoastMetaDetailed($wpPostId, $news);
@@ -156,7 +163,7 @@ class WordPressPostingService
     public function repushSeoMetaForNews(News $news): array
     {
         try {
-            $wpPostId = $this->findWordPressPostIdByTitle($news->title);
+            $wpPostId = $this->resolveWordPressPostIdForNews($news);
             if ($wpPostId === null) {
                 return [
                     'success' => false,
@@ -203,7 +210,7 @@ class WordPressPostingService
     public function reindexYoastForNews(News $news): array
     {
         try {
-            $wpPostId = $this->findWordPressPostIdByTitle($news->title);
+            $wpPostId = $this->resolveWordPressPostIdForNews($news);
             if ($wpPostId === null) {
                 return [
                     'success' => false,
@@ -216,15 +223,21 @@ class WordPressPostingService
                 ];
             }
 
+            // Mirror an editor save cycle: touch the WP post first, then rebuild Yoast.
+            $postTouch = $this->refreshWordPressPostForYoastDetailed($wpPostId, $news);
             $yoast = $this->updateYoastMetaDetailed($wpPostId, $news, true);
+            $touchHttpStatus = $postTouch['http_status'] ?? null;
+            $isTouchOk = is_int($touchHttpStatus) && $touchHttpStatus >= 200 && $touchHttpStatus < 300;
             $httpStatus = $yoast['http_status'] ?? null;
-            $isOk = is_int($httpStatus) && $httpStatus >= 200 && $httpStatus < 300;
+            $isYoastOk = is_int($httpStatus) && $httpStatus >= 200 && $httpStatus < 300;
+            $isOk = $isTouchOk && $isYoastOk;
 
             return [
                 'success' => $isOk,
                 'wp_post_id' => $wpPostId,
-                'error' => $isOk ? null : 'yoast_reindex_failed',
+                'error' => $isOk ? null : ($isTouchOk ? 'yoast_reindex_failed' : 'wordpress_post_touch_failed'),
                 'details' => [
+                    'post_touch' => $postTouch,
                     'yoast_meta' => $yoast,
                 ],
             ];
@@ -322,8 +335,9 @@ class WordPressPostingService
     {
         try {
             $metaPayload = $this->buildSeoMetaPayload($news, $requestReindex);
+            $yoastAuthToken = $this->yoastAuthToken !== '' ? $this->yoastAuthToken : $this->authToken;
             $response = Http::withHeaders([
-                    'Authorization' => 'Basic ' . $this->authToken,
+                    'Authorization' => 'Basic ' . $yoastAuthToken,
                     'Content-Type'  => 'application/json',
                 ])
                 ->timeout(15)
@@ -350,6 +364,48 @@ class WordPressPostingService
             ];
         } catch (\Throwable $e) {
             Log::warning("Error updating Yoast meta for WP post {$wpPostId}: " . $e->getMessage());
+            return [
+                'attempted' => true,
+                'http_status' => null,
+                'response_excerpt' => null,
+                'exception' => [
+                    'message' => $e->getMessage(),
+                    'class' => get_class($e),
+                ],
+            ];
+        }
+    }
+
+    private function refreshWordPressPostForYoastDetailed(int $wpPostId, News $news): array
+    {
+        try {
+            $response = Http::withHeaders([
+                    'Authorization' => 'Basic ' . $this->authToken,
+                ])
+                ->timeout(20)
+                ->post("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
+                    'title' => (string) $news->title,
+                    'content' => (string) $news->content,
+                    'excerpt' => (string) ($news->metadescription ?? ''),
+                    'status' => 'publish',
+                ]);
+
+            if (!$response->successful()) {
+                Log::warning("WP post touch failed for WP post {$wpPostId} [{$response->status()}]");
+                return [
+                    'attempted' => true,
+                    'http_status' => $response->status(),
+                    'response_excerpt' => $this->excerptWpResponse($response->body()),
+                ];
+            }
+
+            return [
+                'attempted' => true,
+                'http_status' => $response->status(),
+                'response_excerpt' => $this->excerptWpResponse($response->body()),
+            ];
+        } catch (\Throwable $e) {
+            Log::warning("Error touching WP post {$wpPostId} before Yoast reindex: " . $e->getMessage());
             return [
                 'attempted' => true,
                 'http_status' => null,
@@ -433,10 +489,14 @@ class WordPressPostingService
         $payload = [
             'metadesc' => $metaDescription,
             'focuskw' => $focusKeyphrase,
+            'post_title' => (string) $news->title,
+            'post_excerpt' => $metaDescription,
+            'post_content' => (string) $news->content,
         ];
 
         if ($requestReindex) {
             $payload['reindex'] = true;
+            $payload['touch_post'] = true;
         }
 
         return $payload;
@@ -445,6 +505,125 @@ class WordPressPostingService
     private function buildYoastEndpointUrl(int $wpPostId): string
     {
         return rtrim($this->wpUrl, '/') . '/wp-json/aeromorning/v1/yoast/' . $wpPostId;
+    }
+
+    /**
+     * Backfill local wp_post_id mapping for already published news.
+     */
+    public function backfillWordPressPostIdForNews(News $news): array
+    {
+        try {
+            $mappedId = (int) ($news->wp_post_id ?? 0);
+            if ($mappedId > 0 && $this->wordPressPostExists($mappedId)) {
+                return [
+                    'success' => true,
+                    'wp_post_id' => $mappedId,
+                    'error' => null,
+                    'details' => [
+                        'mapping_source' => 'existing',
+                    ],
+                ];
+            }
+
+            $resolvedByTitle = $this->findWordPressPostIdByTitle((string) $news->title);
+            if ($resolvedByTitle === null) {
+                return [
+                    'success' => false,
+                    'wp_post_id' => null,
+                    'error' => 'wordpress_post_not_found',
+                    'details' => [
+                        'mapping_source' => 'title_search',
+                    ],
+                ];
+            }
+
+            $this->persistWordPressPostMapping($news, $resolvedByTitle);
+
+            return [
+                'success' => true,
+                'wp_post_id' => $resolvedByTitle,
+                'error' => null,
+                'details' => [
+                    'mapping_source' => 'title_search',
+                ],
+            ];
+        } catch (\Throwable $e) {
+            Log::warning("Error backfilling WP post mapping for news #{$news->id}: " . $e->getMessage());
+            return [
+                'success' => false,
+                'wp_post_id' => null,
+                'error' => $e->getMessage(),
+                'details' => [
+                    'exception' => [
+                        'message' => $e->getMessage(),
+                        'class' => get_class($e),
+                    ],
+                ],
+            ];
+        }
+    }
+
+    private function resolveWordPressPostIdForNews(News $news): ?int
+    {
+        $mappedId = (int) ($news->wp_post_id ?? 0);
+        if ($mappedId > 0) {
+            if ($this->wordPressPostExists($mappedId)) {
+                return $mappedId;
+            }
+
+            Log::warning("Mapped WP post ID {$mappedId} no longer exists for news #{$news->id}; trying title fallback");
+        }
+
+        if ($this->allowTitleFallback) {
+            $resolvedByTitle = $this->findWordPressPostIdByTitle((string) $news->title);
+            if ($resolvedByTitle !== null) {
+                $this->persistWordPressPostMapping($news, $resolvedByTitle);
+                return $resolvedByTitle;
+            }
+        }
+
+        return null;
+    }
+
+    private function wordPressPostExists(int $wpPostId): bool
+    {
+        try {
+            $response = Http::withHeaders([
+                    'Authorization' => 'Basic ' . $this->authToken,
+                ])
+                ->timeout(15)
+                ->get("{$this->wpUrl}/wp-json/wp/v2/posts/{$wpPostId}", [
+                    'context' => 'edit',
+                ]);
+
+            if ($response->status() === 404) {
+                return false;
+            }
+
+            return $response->successful();
+        } catch (\Throwable $e) {
+            Log::warning("Unable to verify WP post ID {$wpPostId}: " . $e->getMessage());
+            // Be permissive on transient network errors; keep current mapping.
+            return true;
+        }
+    }
+
+    private function persistWordPressPostMapping(News $news, int $wpPostId): void
+    {
+        if ($wpPostId <= 0) {
+            return;
+        }
+
+        if ((int) ($news->wp_post_id ?? 0) === $wpPostId) {
+            return;
+        }
+
+        try {
+            $news->wp_post_id = $wpPostId;
+            $news->save();
+        } catch (\Throwable $e) {
+            Log::warning("Unable to persist WP post mapping for news #{$news->id}: " . $e->getMessage());
+        }
     }
 
     private function findWordPressPostIdByTitle(string $title): ?int
@@ -568,6 +747,7 @@ class WordPressPostingService
             if ($response->successful()) {
                 $postId = $response->json()['id'];
                 Log::info("News Posted to WordPress with ID: $postId");
+                $this->persistWordPressPostMapping($news, (int) $postId);
 
                 // Best-effort Yoast SEO meta update
                 $this->updateYoastMetaBasicAuthDetailed((int) $postId, $news, $username, $password);

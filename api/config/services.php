@@ -6,6 +6,9 @@ return [
         'en_url'   => env('WORDPRESS_EN_URL', 'https://preprod.aeromorning.com/en'),
         'auth_fr'  => env('WORDPRESS_AUTH_FR', ''),
         'auth_en'  => env('WORDPRESS_AUTH_EN', ''),
+        'yoast_auth_fr' => env('WORDPRESS_YOAST_AUTH_FR', env('WORDPRESS_AUTH_FR', '')),
+        'yoast_auth_en' => env('WORDPRESS_YOAST_AUTH_EN', env('WORDPRESS_AUTH_EN', '')),
+        'allow_title_fallback' => env('WORDPRESS_ALLOW_TITLE_FALLBACK', false),
     ],
 
     'notify' => [

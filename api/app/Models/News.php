@@ -17,11 +17,13 @@ class News extends Model
         'categories',
         'tags',
         'image_url',
+        'wp_post_id',
         'status',
         'email_message_id'
     ];
 
     protected $casts = [
+        'wp_post_id' => 'integer',
         'status' => 'integer',
         'created_at' => 'datetime',
         'updated_at' => 'datetime'
