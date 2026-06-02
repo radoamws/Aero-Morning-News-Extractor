@@ -23,7 +23,8 @@ const {
   processProgress,
   processLogs,
   processLogsLoading,
-  seoRepushStatus
+  seoRepushStatus,
+  yoastReindexStatus
 } = storeToRefs(newsStore);
 
 const wpUser = ref("");
@@ -128,6 +129,14 @@ const runSeoRepush = async () => {
   );
 };
 
+const runYoastReindex = async () => {
+  const parsedResumeAfterId = Number.parseInt(seoRepushResumeAfterId.value, 10);
+  await newsStore.runYoastReindexScores(
+    seoRepushLimit.value,
+    Number.isFinite(parsedResumeAfterId) && parsedResumeAfterId > 0 ? parsedResumeAfterId : null
+  );
+};
+
 const resetSeoRepushResume = () => {
   seoRepushResumeAfterId.value = "";
   seoRepushResumeTouched.value = false;
@@ -151,7 +160,8 @@ onMounted(async () => {
     newsStore.fetchNews(),
     newsStore.fetchStats(),
     newsStore.fetchProcessLogs(),
-    newsStore.fetchSeoRepushStatus()
+    newsStore.fetchSeoRepushStatus(),
+    newsStore.fetchYoastReindexStatus()
   ]);
 });
 </script>
@@ -193,10 +203,16 @@ onMounted(async () => {
         <button class="btn btn-primary" :disabled="actionLoading" @click="runSeoRepush">
           Repush SEO Meta
         </button>
+        <button class="btn btn-primary" :disabled="actionLoading" @click="runYoastReindex">
+          Reindex Yoast Scores
+        </button>
         <button class="btn btn-ghost" :disabled="loading" @click="newsStore.fetchNews()">Rafraichir liste</button>
         <button class="btn btn-ghost" @click="newsStore.fetchStats()">Rafraichir stats</button>
         <button class="btn btn-ghost" :disabled="actionLoading" @click="newsStore.fetchSeoRepushStatus()">
           Rafraichir statut SEO
+        </button>
+        <button class="btn btn-ghost" :disabled="actionLoading" @click="newsStore.fetchYoastReindexStatus()">
+          Rafraichir statut Reindex
         </button>
       </div>
 
@@ -213,6 +229,20 @@ onMounted(async () => {
           </p>
           <p class="muted" style="margin: 0;">
             Le champ "Reprendre apres ID" est pre-rempli avec la reprise detectee et tu peux le modifier avant de lancer.
+          </p>
+        </template>
+      </div>
+
+      <div class="panel" style="margin-top: 16px;">
+        <h3 style="margin: 0 0 8px;">Statut reindex Yoast</h3>
+        <p class="muted" v-if="!yoastReindexStatus">Aucun statut disponible.</p>
+        <template v-else>
+          <p class="muted" style="margin: 0 0 6px;">
+            Dernier run: {{ yoastReindexStatus.latest_run?.status || '-' }}
+            | debut: {{ yoastReindexStatus.latest_run?.started_at ? new Date(yoastReindexStatus.latest_run.started_at).toLocaleString('fr-FR') : '-' }}
+          </p>
+          <p class="muted" style="margin: 0;">
+            Checkpoint: {{ yoastReindexStatus.checkpoint?.has_checkpoint ? 'oui' : 'non' }}
           </p>
         </template>
       </div>

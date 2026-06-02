@@ -32,6 +32,8 @@ Route::middleware('auth:sanctum')->group(function () {
 	Route::post('/publish-pending', [WordPressPostingController::class, 'publishPendingNews']);
 	Route::post('/repush-seo-meta', [WordPressPostingController::class, 'repushAllSeoMeta']);
 	Route::get('/repush-seo-meta/status', [WordPressPostingController::class, 'repushSeoMetaStatus']);
+	Route::post('/reindex-yoast-scores', [WordPressPostingController::class, 'reindexYoastScores']);
+	Route::get('/reindex-yoast-scores/status', [WordPressPostingController::class, 'reindexYoastScoresStatus']);
 	Route::get('/news/{id}/preview', [WordPressPostingController::class, 'previewNews']);
 
 	// Statistics

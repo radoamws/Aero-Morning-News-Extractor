@@ -198,6 +198,53 @@ class WordPressPostingService
     }
 
     /**
+     * Ask the custom Yoast endpoint to reindex SEO scores server-side.
+     */
+    public function reindexYoastForNews(News $news): array
+    {
+        try {
+            $wpPostId = $this->findWordPressPostIdByTitle($news->title);
+            if ($wpPostId === null) {
+                return [
+                    'success' => false,
+                    'wp_post_id' => null,
+                    'error' => 'wordpress_post_not_found',
+                    'details' => [
+                        'title' => $news->title,
+                        'lang' => $news->lang,
+                    ],
+                ];
+            }
+
+            $yoast = $this->updateYoastMetaDetailed($wpPostId, $news, true);
+            $httpStatus = $yoast['http_status'] ?? null;
+            $isOk = is_int($httpStatus) && $httpStatus >= 200 && $httpStatus < 300;
+
+            return [
+                'success' => $isOk,
+                'wp_post_id' => $wpPostId,
+                'error' => $isOk ? null : 'yoast_reindex_failed',
+                'details' => [
+                    'yoast_meta' => $yoast,
+                ],
+            ];
+        } catch (\Throwable $e) {
+            Log::warning("Error reindexing Yoast for news #{$news->id}: " . $e->getMessage());
+            return [
+                'success' => false,
+                'wp_post_id' => null,
+                'error' => $e->getMessage(),
+                'details' => [
+                    'exception' => [
+                        'message' => $e->getMessage(),
+                        'class' => get_class($e),
+                    ],
+                ],
+            ];
+        }
+    }
+
+    /**
      * Upload the news image to the WordPress media library using
      * multipart/form-data with field key "file".
      */
@@ -271,10 +318,10 @@ class WordPressPostingService
     /**
      * Update Yoast SEO meta on an existing WordPress post.
      */
-    private function updateYoastMetaDetailed(int $wpPostId, News $news): array
+    private function updateYoastMetaDetailed(int $wpPostId, News $news, bool $requestReindex = false): array
     {
         try {
-            $metaPayload = $this->buildSeoMetaPayload($news);
+            $metaPayload = $this->buildSeoMetaPayload($news, $requestReindex);
             $response = Http::withHeaders([
                     'Authorization' => 'Basic ' . $this->authToken,
                     'Content-Type'  => 'application/json',
@@ -315,10 +362,10 @@ class WordPressPostingService
         }
     }
 
-    private function updateYoastMetaBasicAuthDetailed(int $wpPostId, News $news, string $username, string $password): array
+    private function updateYoastMetaBasicAuthDetailed(int $wpPostId, News $news, string $username, string $password, bool $requestReindex = false): array
     {
         try {
-            $metaPayload = $this->buildSeoMetaPayload($news);
+            $metaPayload = $this->buildSeoMetaPayload($news, $requestReindex);
             $response = Http::withBasicAuth($username, $password)
                 ->withHeaders([
                     'Content-Type' => 'application/json',
@@ -378,15 +425,21 @@ class WordPressPostingService
     /**
      * Build a WordPress REST meta payload that covers the supported SEO plugins.
      */
-    private function buildSeoMetaPayload(News $news): array
+    private function buildSeoMetaPayload(News $news, bool $requestReindex = false): array
     {
         $metaDescription = (string) ($news->metadescription ?? '');
         $focusKeyphrase = (string) ($news->focuskeyphrase ?? '');
 
-        return [
+        $payload = [
             'metadesc' => $metaDescription,
             'focuskw' => $focusKeyphrase,
         ];
+
+        if ($requestReindex) {
+            $payload['reindex'] = true;
+        }
+
+        return $payload;
     }
 
     private function buildYoastEndpointUrl(int $wpPostId): string
@@ -486,7 +539,6 @@ class WordPressPostingService
                 'content' => $news->content,
                 'excerpt' => $news->metadescription,
                 'status' => 'publish',
-                'meta' => $this->buildSeoMetaPayload($news),
             ];
 
             // Add categories
@@ -581,7 +633,6 @@ class WordPressPostingService
                 'title' => $news->title,
                 'content' => $news->content,
                 'excerpt' => $news->metadescription,
-                'meta' => $this->buildSeoMetaPayload($news),
             ];
 
             if (!empty($news->categories)) {

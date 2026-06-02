@@ -46,6 +46,7 @@ export const useNewsStore = defineStore("news", {
     processLogs: [] as ProcessLogItem[],
     processLogsLoading: false,
     seoRepushStatus: null as null | Record<string, any>,
+    yoastReindexStatus: null as null | Record<string, any>,
     processLogsPagination: {
       current_page: 1,
       last_page: 1,
@@ -198,6 +199,16 @@ export const useNewsStore = defineStore("news", {
         this.seoRepushStatus = null;
       }
     },
+    async fetchYoastReindexStatus() {
+      const { request } = useApi();
+
+      try {
+        const response = await request<{ success: boolean; data: Record<string, any> }>("/reindex-yoast-scores/status");
+        this.yoastReindexStatus = response.data;
+      } catch {
+        this.yoastReindexStatus = null;
+      }
+    },
     async runSyncWordPress() {
       const { request } = useApi();
       this.actionLoading = true;
@@ -333,6 +344,53 @@ export const useNewsStore = defineStore("news", {
         await Promise.all([this.fetchNews(), this.fetchStats(), this.fetchProcessLogs(), this.fetchSeoRepushStatus()]);
       } catch (error: any) {
         this.setError(error?.data?.message || "Echec repush SEO");
+      } finally {
+        this.actionLoading = false;
+      }
+    },
+    async runYoastReindexScores(limit = 200, resumeAfterNewsId?: number | null) {
+      const { request } = useApi();
+      this.actionLoading = true;
+
+      try {
+        const body: Record<string, number> = { limit };
+        if (typeof resumeAfterNewsId === "number" && Number.isFinite(resumeAfterNewsId) && resumeAfterNewsId > 0) {
+          body.resume_after_news_id = resumeAfterNewsId;
+        }
+
+        const result = await request<{
+          message: string;
+          data?: {
+            processed?: number;
+            updated?: number;
+            not_found?: number;
+            failed?: number;
+            next_resume_after_news_id?: number | null;
+          };
+        }>("/reindex-yoast-scores", {
+          method: "POST",
+          body
+        });
+
+        const details = result.data || {};
+        const checkpointText = details.next_resume_after_news_id
+          ? `, reprise apres news ID ${details.next_resume_after_news_id}`
+          : "";
+
+        this.setMessage(
+          `${result.message || "Reindex Yoast termine"} ` +
+            `(processed: ${details.processed ?? 0}, updated: ${details.updated ?? 0}, not found: ${details.not_found ?? 0}, failed: ${details.failed ?? 0}${checkpointText})`
+        );
+
+        await Promise.all([
+          this.fetchNews(),
+          this.fetchStats(),
+          this.fetchProcessLogs(),
+          this.fetchSeoRepushStatus(),
+          this.fetchYoastReindexStatus()
+        ]);
+      } catch (error: any) {
+        this.setError(error?.data?.message || "Echec reindex Yoast");
       } finally {
         this.actionLoading = false;
       }

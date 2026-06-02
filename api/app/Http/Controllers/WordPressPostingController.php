@@ -593,10 +593,204 @@ class WordPressPostingController extends Controller
         ]);
     }
 
+    /**
+     * Batch reindex of Yoast scores via custom endpoint.
+     */
+    public function reindexYoastScores(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'limit' => 'nullable|integer|min:1|max:1000',
+            'resume_after_news_id' => 'nullable|integer|min:1',
+        ]);
+
+        $limit = (int) ($validated['limit'] ?? 200);
+        $requestedResumeAfterId = isset($validated['resume_after_news_id'])
+            ? (int) $validated['resume_after_news_id']
+            : null;
+
+        $processType = 'yoast_reindex_scores';
+        $processLogService = app(ProcessLogService::class);
+        $checkpoint = $this->getCheckpointByProcessType($processType);
+        $resumeAfterId = $requestedResumeAfterId
+            ?? ($checkpoint['next_resume_after_news_id'] ?? null);
+
+        $processLog = $processLogService->startRun($processType, [
+            'source' => 'api',
+            'details' => [
+                'resume_after_news_id' => $resumeAfterId,
+                'checkpoint_log_id' => $checkpoint['log_id'] ?? null,
+                'limit' => $limit,
+            ],
+        ]);
+
+        $startedAt = microtime(true);
+        $httpMaxSeconds = (int) env('YOAST_REINDEX_HTTP_MAX_SECONDS', 120);
+        if ($httpMaxSeconds <= 0) {
+            @ini_set('max_execution_time', '0');
+            @set_time_limit(0);
+            $deadline = PHP_FLOAT_MAX;
+        } else {
+            @ini_set('max_execution_time', (string) $httpMaxSeconds);
+            @set_time_limit($httpMaxSeconds);
+            $deadline = $startedAt + max(1, $httpMaxSeconds - 10);
+        }
+
+        $query = News::query()->orderByDesc('id');
+        if (is_int($resumeAfterId) && $resumeAfterId > 0) {
+            $query->where('id', '<', $resumeAfterId);
+        }
+
+        $targets = $query->limit($limit)->get();
+
+        if ($targets->isEmpty()) {
+            $details = [
+                'processed' => 0,
+                'updated' => 0,
+                'not_found' => 0,
+                'failed' => 0,
+                'next_resume_after_news_id' => null,
+                'has_more' => false,
+                'resume_after_news_id' => $resumeAfterId,
+            ];
+
+            $processLogService->finishRun(
+                $processLog,
+                ProcessLogService::STATUS_SUCCESS,
+                $details,
+                'No news left to Yoast reindex.'
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'No news left to Yoast reindex.',
+                'data' => $details,
+            ]);
+        }
+
+        $results = [
+            'processed' => 0,
+            'updated' => 0,
+            'not_found' => 0,
+            'failed' => 0,
+            'items' => [],
+        ];
+
+        $abortedDueToTimeBudget = false;
+        $lastProcessedNewsId = null;
+        $lastCheckpointNewsId = null;
+
+        foreach ($targets as $news) {
+            if (microtime(true) >= $deadline) {
+                $abortedDueToTimeBudget = true;
+                break;
+            }
+
+            $service = new WordPressPostingService($news->lang);
+            $reindexResult = $service->reindexYoastForNews($news);
+
+            $results['processed']++;
+            $lastProcessedNewsId = (int) $news->id;
+
+            if (($reindexResult['success'] ?? false) === true) {
+                $results['updated']++;
+                $lastCheckpointNewsId = (int) $news->id;
+            } elseif (($reindexResult['error'] ?? null) === 'wordpress_post_not_found') {
+                $results['not_found']++;
+                $lastCheckpointNewsId = (int) $news->id;
+            } else {
+                $results['failed']++;
+            }
+
+            $results['items'][] = [
+                'news_id' => $news->id,
+                'lang' => $news->lang,
+                'title' => $news->title,
+                'wp_post_id' => $reindexResult['wp_post_id'] ?? null,
+                'success' => (bool) ($reindexResult['success'] ?? false),
+                'error' => $reindexResult['error'] ?? null,
+            ];
+        }
+
+        $hasMore = false;
+        if (is_int($lastCheckpointNewsId) && $lastCheckpointNewsId > 0) {
+            $hasMore = News::where('id', '<', $lastCheckpointNewsId)->exists();
+        } elseif (is_int($lastProcessedNewsId) && $lastProcessedNewsId > 0) {
+            $hasMore = true;
+        }
+
+        $nextResumeAfterNewsId = null;
+        if ($hasMore || $abortedDueToTimeBudget) {
+            if (is_int($lastCheckpointNewsId) && $lastCheckpointNewsId > 0) {
+                $nextResumeAfterNewsId = $lastCheckpointNewsId;
+            } elseif (is_int($resumeAfterId) && $resumeAfterId > 0) {
+                $nextResumeAfterNewsId = $resumeAfterId;
+            }
+        }
+
+        $status = ProcessLogService::STATUS_SUCCESS;
+        if ($results['failed'] > 0 || $hasMore || $abortedDueToTimeBudget) {
+            $status = ProcessLogService::STATUS_PARTIAL;
+        }
+
+        $details = [
+            'processed' => $results['processed'],
+            'updated' => $results['updated'],
+            'not_found' => $results['not_found'],
+            'failed' => $results['failed'],
+            'aborted_due_to_time_budget' => $abortedDueToTimeBudget,
+            'next_resume_after_news_id' => $nextResumeAfterNewsId,
+            'resume_after_news_id' => $resumeAfterId,
+            'has_more' => $hasMore,
+            'limit' => $limit,
+            'items' => $results['items'],
+        ];
+
+        $processLogService->finishRun(
+            $processLog,
+            $status,
+            $details,
+            $status === ProcessLogService::STATUS_SUCCESS
+                ? 'Yoast score reindex completed.'
+                : 'Yoast score reindex partially completed.'
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => $status === ProcessLogService::STATUS_SUCCESS
+                ? 'Yoast score reindex completed.'
+                : 'Yoast score reindex partially completed. You can resume from checkpoint.',
+            'data' => $details,
+        ]);
+    }
+
+    public function reindexYoastScoresStatus(): JsonResponse
+    {
+        $processType = 'yoast_reindex_scores';
+        $latest = ProcessLog::query()
+            ->where('process_type', $processType)
+            ->orderByDesc('id')
+            ->first();
+
+        $checkpoint = $this->getCheckpointByProcessType($processType);
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'latest_run' => $latest,
+                'checkpoint' => $checkpoint,
+            ],
+        ]);
+    }
+
     private function getSeoRepushCheckpoint(): array
     {
+        return $this->getCheckpointByProcessType('repush_seo_meta');
+    }
+
+    private function getCheckpointByProcessType(string $processType): array
+    {
         $log = ProcessLog::query()
-            ->where('process_type', 'repush_seo_meta')
+            ->where('process_type', $processType)
             ->whereIn('status', [ProcessLogService::STATUS_RUNNING, ProcessLogService::STATUS_PARTIAL])
             ->orderByDesc('id')
             ->first();
