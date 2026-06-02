@@ -1,61 +1,78 @@
 <?php
-/**
- * Plugin Name: AeroMorning Yoast API Reindex
- */
-
+// mu-plugin: aeromorning-api.php
 add_action('rest_api_init', function () {
     register_rest_route('aeromorning/v1', '/yoast/(?P<id>\d+)', [
-        'methods'  => 'POST',
-        'callback' => 'aeromorning_update_yoast_meta_and_reindex',
-        'permission_callback' => function (WP_REST_Request $request) {
-            $post_id = (int) $request['id'];
-            return current_user_can('edit_post', $post_id);
+        'methods'             => 'POST',
+        'callback'            => 'aeromorning_update_yoast_meta',
+        'permission_callback' => function () {
+            return current_user_can('edit_posts');
         },
         'args' => [
-            'metadesc' => ['type' => 'string', 'required' => false],
-            'focuskw'  => ['type' => 'string', 'required' => false],
-            'reindex'  => ['type' => 'boolean', 'required' => false],
+            'id' => [
+                'validate_callback' => fn($v) => is_numeric($v),
+                'sanitize_callback' => 'absint',
+            ],
         ],
     ]);
 });
 
-function aeromorning_update_yoast_meta_and_reindex(WP_REST_Request $request) {
-    $post_id = (int) $request['id'];
-    if (!$post_id || get_post_status($post_id) === false) {
-        return new WP_REST_Response(['success' => false, 'message' => 'Post introuvable'], 404);
+function aeromorning_update_yoast_meta(WP_REST_Request $request): WP_REST_Response {
+    $post_id  = (int) $request->get_param('id');
+    $body     = $request->get_json_params();
+    $metadesc = isset($body['metadesc']) ? sanitize_text_field($body['metadesc']) : null;
+    $focuskw  = isset($body['focuskw'])  ? sanitize_text_field($body['focuskw'])  : null;
+    $reindex  = !empty($body['reindex']);
+
+    if (! get_post($post_id)) {
+        return new WP_REST_Response(['error' => 'post_not_found'], 404);
     }
 
-    $metadesc = (string) $request->get_param('metadesc');
-    $focuskw  = (string) $request->get_param('focuskw');
-    $reindex  = (bool) $request->get_param('reindex');
+    $updated = [];
 
-    if ($metadesc !== '') {
-        update_post_meta($post_id, '_yoast_wpseo_metadesc', wp_strip_all_tags($metadesc));
+    if ($metadesc !== null) {
+        update_post_meta($post_id, '_yoast_wpseo_metadesc', $metadesc);
+        $updated['metadesc'] = $metadesc;
+    }
+    if ($focuskw !== null) {
+        update_post_meta($post_id, '_yoast_wpseo_focuskw', $focuskw);
+        $updated['focuskw'] = $focuskw;
     }
 
-    if ($focuskw !== '') {
-        update_post_meta($post_id, '_yoast_wpseo_focuskw', wp_strip_all_tags($focuskw));
-    }
+    // ─── Rebuild Yoast indexable (scores + structured data) ──────────────────
+    // wp_update_post() alone does NOT recompute Yoast scores.
+    // We must go through Yoast's own Indexable_Builder.
+    $reindex_result = 'skipped';
 
-    // Force un "save" serveur pour déclencher les hooks Yoast (équivalent sauvegarde BO).
-    if ($reindex || defined('WP_DEBUG')) {
-        remove_action('save_post', 'wp_save_post_revision');
-        wp_update_post([
-            'ID' => $post_id,
-            'post_modified' => current_time('mysql'),
-            'post_modified_gmt' => current_time('mysql', 1),
-        ]);
-        add_action('save_post', 'wp_save_post_revision');
-        clean_post_cache($post_id);
+    if ($reindex && function_exists('YoastSEO')) {
+        try {
+            $container = YoastSEO()->classes;
+
+            // Yoast SEO ≥ 14 stores scores in yoast_indexable table.
+            // build_for_id_and_type(id, type, update) forces a full rebuild:
+            // re-reads meta, recalculates seo_score, readability_score, etc.
+            $builder = $container->get(\Yoast\WP\SEO\Builders\Indexable_Builder::class);
+            $builder->build_for_id_and_type($post_id, 'post', true);
+
+            // Also rebuild the indexable hierarchy link (breadcrumbs etc.)
+            $hierarchy = $container->get(\Yoast\WP\SEO\Builders\Indexable_Hierarchy_Builder::class);
+            $indexable_repository = $container->get(\Yoast\WP\SEO\Repositories\Indexable_Repository::class);
+            $indexable = $indexable_repository->find_by_id_and_type($post_id, 'post');
+            if ($indexable) {
+                $hierarchy->build($indexable);
+            }
+
+            $reindex_result = 'ok';
+        } catch (\Throwable $e) {
+            // Fallback: fire save_post hooks manually (works on Yoast < 14)
+            do_action('save_post', $post_id, get_post($post_id), true);
+            $reindex_result = 'fallback_save_post: ' . $e->getMessage();
+        }
     }
 
     return new WP_REST_Response([
-        'success' => true,
-        'post_id' => $post_id,
-        'meta' => [
-            '_yoast_wpseo_metadesc' => get_post_meta($post_id, '_yoast_wpseo_metadesc', true),
-            '_yoast_wpseo_focuskw'  => get_post_meta($post_id, '_yoast_wpseo_focuskw', true),
-        ],
-        'reindexed' => (bool) ($reindex || defined('WP_DEBUG')),
+        'success'        => true,
+        'post_id'        => $post_id,
+        'updated'        => $updated,
+        'reindex_result' => $reindex_result,
     ], 200);
 }
