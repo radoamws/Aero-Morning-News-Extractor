@@ -363,33 +363,33 @@ class EmailService
         // Replace other control chars (keep newlines/tabs).
         $value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', ' ', $value) ?? $value;
 
-        // Repair cases where quoted-printable bytes were stripped of ‘=’ and left as hex, e.g. d=E9 -> dE9 -> de9.
+        // Repair cases where quoted-printable bytes were stripped of '=' and left as hex, e.g. d=E9 -> dE9 -> de9.
         // We only replace when the 2-hex sequence is adjacent to letters to avoid touching IDs (A220) or URLs (%e9).
         //
         // IMPORTANT: Only map pairs that contain at least one digit character (0-9).
-        // All-letter pairs like ‘ce’, ‘ea’, ‘ef’, ‘ca’, ‘cb’, etc. are indistinguishable from
+        // All-letter pairs like 'ce', 'ea', 'ef', 'ca', 'cb', etc. are indistinguishable from
         // normal English letter sequences (e.g. "ICEYE", "leader", "Chief", "officer") and must
         // NOT be included — they cause false-positive corruption on English-language emails.
         $map = [
-            // lower — digit-containing pairs only (safe: won’t match English letter sequences)
-            ‘e0’ => ‘à’,
-            ‘e2’ => ‘â’,
-            ‘e7’ => ‘ç’,
-            ‘e8’ => ‘è’,
-            ‘e9’ => ‘é’,
-            ‘f4’ => ‘ô’,
-            ‘f9’ => ‘ù’,
-            ‘a0’ => ‘ ‘,
+            // lower — digit-containing pairs only (safe: won't match English letter sequences)
+            'e0' => 'à',
+            'e2' => 'â',
+            'e7' => 'ç',
+            'e8' => 'è',
+            'e9' => 'é',
+            'f4' => 'ô',
+            'f9' => 'ù',
+            'a0' => ' ',
             // upper — digit-containing pairs only
-            ‘c0’ => ‘À’,
-            ‘c2’ => ‘Â’,
-            ‘c7’ => ‘Ç’,
-            ‘c8’ => ‘È’,
-            ‘c9’ => ‘É’,
-            ‘d4’ => ‘Ô’,
-            ‘d9’ => ‘Ù’,
+            'c0' => 'À',
+            'c2' => 'Â',
+            'c7' => 'Ç',
+            'c8' => 'È',
+            'c9' => 'É',
+            'd4' => 'Ô',
+            'd9' => 'Ù',
             // Heuristic: some feeds/emails yield b9 in place of apostrophes.
-            ‘b9’ => ‘’’,
+            'b9' => "\u{2019}",
         ];
 
         $value = preg_replace_callback(
