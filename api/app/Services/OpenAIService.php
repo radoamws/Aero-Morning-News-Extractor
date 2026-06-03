@@ -415,40 +415,36 @@ class OpenAIService
             return "- ID: {$cat['wp_id']}, Name: {$cat['categ_name']}";
         }, $categories));
 
-        $prompt = "RÔLE :
-Tu es un classificateur éditorial spécialisé en aéronautique et transport aérien.
+        $prompt = "ROLE :
+Tu es un classificateur editorial specialise en aeronautique et transport aerien.
 
-CONTEXTE :
-Voici le contenu HTML brut d'une news aéronautique.
-Le texte peut être français et/ou anglais.
-
-CONTENU DE LA NEWS: 
+CONTENU DE LA NEWS:
 $newsContent
 
-LISTE DES CATÉGORIES:
+LISTE DES CATEGORIES:
 $categoriesList
 
 --------------------------------------------------
 
-RÈGLE FIXE :
-La catégorie \"News\" est TOUJOURS pertinente pour ce contenu.
+DETECTION PRIORITAIRE - HEADER AEROMORNING :
+Cherche dans le contenu une ligne qui mentionne la categorie de l'article (qui sera après la categorie News)
+ou toute variation (Defence, Spatial, MRO, etc.).
+Si tu en trouves une, extrais la categorie secondaire (le mot apres le slash : Industry, Industrie, Defence, MRO, Spatial, etc.)
+et cherche-la dans la LISTE DES CATEGORIES. Si elle y est, ajoute son wp_id en second (apres News).
 
-MÉTHODE D'ANALYSE OBLIGATOIRE :
-1. Identifier le SUJET PRINCIPAL de la news.
-2. Identifier les SUJETS SECONDAIRES DIRECTEMENT LIÉS au sujet principal.
+REGLE FIXE :
+La categorie \"News\" est TOUJOURS en premiere position. Son wp_id doit etre le premier retourne.
 
-CRITÈRES DE SÉLECTION :
-Une catégorie est pertinente UNIQUEMENT si elle décrit directement :
-- le type d'activité principale (ex : transport aérien)
-- le secteur industriel concerné
-- un aspect financier STRUCTURANT (leasing, investissement, contrat, acteur coté, ...)
+CRITERES DE SELECTION :
+Selectionne au MAXIMUM 3 categories.
+Une categorie est pertinente UNIQUEMENT si elle decrit directement le secteur ou l'activite principale de la news.
 
 FORMAT DE SORTIE :
-Retourne les wp_id que tu trouve et séparés par des virgules. Et obligatoirement ajoute en premier le wp_id de la catégorie name = \"news\".
-Aucun texte supplémentaire et aucune lettre.
+Retourne uniquement les wp_id separes par des virgules. Le wp_id de \"News\" en premier.
+Aucun texte supplementaire.
 
 EXEMPLE VALIDE :
-1,5,8";
+1,5";
 
         return $this->sanitizeIdList($this->callOpenAI($prompt, 80), $categories, $newsContent, true, 'categ_name');
     }
@@ -466,99 +462,76 @@ EXEMPLE VALIDE :
             return "- ID: {$tag['wp_id']}, Name: {$tag['tag_name']}";
         }, $tags));
 
-        $prompt = "RÔLE :
-        Tu es un classificateur éditorial expert en aéronautique, aviation civile et industrie aérospatiale.
+        $prompt = "ROLE :
+Tu es un classificateur editorial expert en aeronautique, aviation civile et industrie aérospatiale.
 
-        CONTEXTE :
-        Tu dois sélectionner uniquement les tags réellement pertinents pour une news aéronautique.
-        Le texte peut être en français et/ou anglais.
+CONTENU DE LA NEWS:
+$newsContent
 
-        CONTENU DE LA NEWS:
-        $newsContent
+LISTE DES TAGS DISPONIBLES:
+$tagsList
 
-        LISTE DES TAGS DISPONIBLES:
-        $tagsList
+========================
+ETAPE 1 - DETECTION DU HEADER AEROMORNING (PRIORITE ABSOLUE)
+========================
+Cherche dans le contenu une ligne qui mentionne la catégorie de l'article
+ou toute variation (Defence, Spatial, MRO, Airline, etc.).
 
-                ========================
-                RÈGLE DE QUANTITÉ (TRÈS IMPORTANT)
-                ========================
-                - Par défaut, retourne AU MAXIMUM 5 tags (wp_id).
-                - N'ajoute jamais de tags 'pour faire joli' : si tu n'es pas sûr qu'un tag est directement pertinent, ne le sélectionne pas.
+Si tu en trouves une :
+1. Cherche dans la liste le tag dont le nom de la société ou du secteur concerné
+2. Extrais la categorie apres le slash (Industry, Industrie, Defence, MRO, etc.)
+   Cherche ce mot dans la liste des tags disponibles -> tag prioritaire 2
+3. Cherche ensuite dans le contenu l’entite aeronautique, spatiale ou défense principale (nom de societe, d’avion ou de programme)
+   Si elle est dans la liste -> tag prioritaire 3 (uniquement si la pertinence est certaine)
+4. Retourne ces 2 ou 3 tags uniquement. Limite stricte : 3 tags maximum.
 
-                EXCEPTION (uniquement si présent dans le contenu) :
-                - Si le contenu de la news contient une LISTE EXPLICITE de tags/mots-clés/hashtags (ex: une ligne Tags: / Mots-clés: / Keywords: ou une liste de #hashtags),
-                    alors retourne UNIQUEMENT les tags de cette liste qui existent dans la LISTE DES TAGS DISPONIBLES.
-                    Dans ce cas précis, tu peux dépasser 5, mais tu n'as pas le droit d'ajouter d'autres tags.
+Si tu n’en trouves pas -> applique l’ETAPE 2.
 
-        ========================
-        FILTRES D'EXCLUSION STRICTS (IMPORTANT)
-        ========================
-        Tu dois REJETER absolument :
+========================
+FILTRE D’EXCLUSION ABSOLU - AUCUNE EXCEPTION POSSIBLE
+========================
+REJETTE TOUJOURS, meme si le tag est dans une liste explicite du contenu :
+- Tout tag qui est une ANNEE ou contient une annee : 2023, 2024, 2025, 2026, 2027, ...
+- Tout tag qui est un MOIS : jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec
+- Tout tag de periode : Q1, Q2, Q3, Q4, H1, H2
+- Tout acronyme generique non identifie comme entite aviation connue (ex: ACH, ACI, ACS, AERO sans contexte precis)
+- Tout tag de temporalite : today, breaking, recent, update, this week
 
-        - Tous les tags contenant une DATE explicite ou implicite :
-        (ex: 2024, 2025, 2026, jan, feb, march, april, may, june, july, aug, sept, oct, nov, dec, Q1, Q2, Q3, Q4)
-        - Tous les tags de temporalité :
-        (today, yesterday, this week, recent, update, breaking, etc.)
-        - Tous les tags NON liés directement à l’aviation / aerospace :
-        - finance générale
-        - politique générale
-        - sport non aérien
-        - technologie non aéronautique
-        - business général sans lien aérien
+========================
+REGLE ANTI-SUBSTITUTION (TRES IMPORTANT)
+========================
+Si une entite mentionnee dans le contenu (societe, compagnie aerienne, programme)
+n’existe PAS dans la liste des tags disponibles, NE LA REMPLACE PAS par une entite similaire.
+Exemple : si le contenu parle de \"Loong Air\" et que ce tag n’existe pas dans la liste,
+ne pas prendre \"SkyWest Airlines\" ou toute autre compagnie a la place.
+Prefere simplement ne pas ajouter ce tag.
 
-        ========================
-        PRIORITÉ ABSOLUE (ACCEPTÉS)
-        ========================
-        Tu dois privilégier UNIQUEMENT les tags liés à :
+========================
+ETAPE 2 - ANALYSE NORMALE (si pas de header AeroMorning detecte)
+========================
+1. Identifie l’entite aeronautique principale (societe, avion, compagnie, programme) mentionnee dans le contenu
+   Verifie qu’elle existe EXACTEMENT dans la liste des tags -> priorite 1
+2. Identifie une seconde entite pertinente si elle existe exactement dans la liste -> priorite 2
+3. N’ajoute un 3eme tag que si sa pertinence est CERTAINE et l’entite existe dans la liste
+Limite stricte : 3 tags maximum. Moins de tags vaut mieux que des tags faux.
 
-        1. COMPAGNIES AÉRIENNES
-        - airlines, low-cost, cargo airlines
+========================
+LIMITE ABSOLUE
+========================
+- Maximum 3 tags au total
+- Si moins de 3 tags sont certains, retourne-en moins
+- Ne jamais substituer une entite absente de la liste par une entite similaire
+- Ne jamais inclure de dates ou annees
 
-        2. AÉRONEFS & TECHNOLOGIE
-        - aircraft models, engines, avionics, drones, satellites
+========================
+FORMAT DE SORTIE
+========================
+- Retourne UNIQUEMENT les wp_id separes par des virgules
+- Aucun texte, aucun espace
+- Si aucun tag pertinent -> retourne vide
 
-        3. INDUSTRIE AÉROSPATIALE
-        - Airbus, Boeing, Embraer, SpaceX, etc.
-
-        4. AÉROPORTS & INFRASTRUCTURES
-        - airports, ATC, air traffic systems
-
-        5. ORGANISATIONS & RÉGULATEURS
-        - ICAO, FAA, EASA, IATA, NASA, etc.
-
-        6. PAYS / RÉGIONS UNIQUEMENT SI CONTEXTE AÉRONAUTIQUE
-        - pays impliqué dans l’événement aviation
-
-        ========================
-        MÉTHODE D'ANALYSE OBLIGATOIRE
-        ========================
-        1. Identifier les entités aéronautiques principales (compagnies, avions, fabricants, aéroports).
-        2. Identifier les organisations et autorités impliquées.
-        3. Identifier les pays UNIQUEMENT s’ils sont directement liés à l’événement aérien.
-        4. Écarter tous les tags non directement liés à l’industrie aéronautique.
-        5. Ne garder que les tags ayant un lien direct avec le contenu de la news.
-        6. Classer les tags restants par pertinence éditoriale.
-
-        ========================
-        ORDRE DE PRIORITÉ DES TAGS
-        ========================
-        1. Entités principales aéronautiques (Airbus, Boeing, etc.)
-        2. Avions / technologies / programmes spatiaux
-        3. Compagnies aériennes
-        4. Aéroports / infrastructures
-        5. Organisations (FAA, EASA, ICAO, NASA…)
-        6. Pays UNIQUEMENT si essentiels au sujet
-
-        ========================
-        FORMAT DE SORTIE (TRÈS IMPORTANT)
-        ========================
-        - Retourne UNIQUEMENT les wp_id
-        - Séparés par des virgules
-        - Aucun texte, aucun mot, aucun espace
-        - Si aucun tag pertinent → retourne vide
-
-        EXEMPLE VALIDE :
-        1,3,7";
+EXEMPLE VALIDE :
+1,3,7";
 
         return $this->sanitizeIdList(
             $this->callOpenAI($prompt, 80),
@@ -1020,34 +993,68 @@ EXEMPLE VALIDE :
 
     private function sanitizeIdList(?string $value, array $items, string $content, bool $includeNewsDefault, string $nameField): string
     {
-        $allowedIds = array_map(static fn ($item) => (string) $item['wp_id'], $items);
-        $parts = preg_split('/[^0-9]+/', (string) $value) ?: [];
-        $ids = [];
+        // Tags/categories that are dates or years must NEVER be selected.
+        $isDateItem = static function (string $name): bool {
+            return (bool) preg_match(
+                '/^\s*(20\d{2}|19\d{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|q[1-4]|h[12])\s*$/i',
+                $name
+            );
+        };
 
-        foreach ($parts as $part) {
-            if ($part !== '' && in_array($part, $allowedIds, true) && !in_array($part, $ids, true)) {
-                $ids[] = $part;
-            }
+        $allowedIds = array_map(static fn ($item) => (string) $item['wp_id'], $items);
+
+        // Build wp_id -> name lookup for date filtering.
+        $idToName = [];
+        foreach ($items as $item) {
+            $idToName[(string) $item['wp_id']] = mb_strtolower((string) $item[$nameField]);
         }
 
+        // Parse AI-returned IDs, applying date exclusion even on AI-selected items.
+        $parts = preg_split('/[^0-9]+/', (string) $value) ?: [];
+        $ids = [];
+        foreach ($parts as $part) {
+            if ($part === '' || !in_array($part, $allowedIds, true) || in_array($part, $ids, true)) {
+                continue;
+            }
+            if ($isDateItem($idToName[$part] ?? '')) {
+                continue;
+            }
+            $ids[] = $part;
+        }
+
+        // "News" category is mandatory when classifying categories — always first.
         if ($includeNewsDefault) {
             foreach ($items as $item) {
-                if (mb_strtolower((string) $item[$nameField]) === 'news' && !in_array((string) $item['wp_id'], $ids, true)) {
-                    array_unshift($ids, (string) $item['wp_id']);
+                if (mb_strtolower((string) $item[$nameField]) === 'news') {
+                    $newsId = (string) $item['wp_id'];
+                    // Remove from wherever it might be and push to front.
+                    $ids = array_values(array_filter($ids, static fn ($id) => $id !== $newsId));
+                    array_unshift($ids, $newsId);
                     break;
                 }
             }
         }
 
-        $contentText = mb_strtolower($this->sanitizePlainText(strip_tags($content)));
-        foreach ($items as $item) {
-            $name = mb_strtolower((string) $item[$nameField]);
-            if ($name !== '' && str_contains($contentText, $name) && !in_array((string) $item['wp_id'], $ids, true)) {
-                $ids[] = (string) $item['wp_id'];
+        // Content-based fallback: only for categories, and only to fill remaining slots.
+        // For tags we trust the AI; the content scan adds noise (short acronyms, years, etc.).
+        $limit = $includeNewsDefault ? 3 : 3;
+        if ($includeNewsDefault && count($ids) < $limit) {
+            $contentText = mb_strtolower($this->sanitizePlainText(strip_tags($content)));
+            foreach ($items as $item) {
+                if (count($ids) >= $limit) {
+                    break;
+                }
+                $name = mb_strtolower((string) $item[$nameField]);
+                if ($name === '' || in_array((string) $item['wp_id'], $ids, true) || $isDateItem($name)) {
+                    continue;
+                }
+                if (str_contains($contentText, $name)) {
+                    $ids[] = (string) $item['wp_id'];
+                }
             }
         }
 
-        return implode(',', array_slice($ids, 0, $includeNewsDefault ? 6 : 12));
+        return implode(',', array_slice($ids, 0, $limit));
     }
 
     private function sanitizePlainText(string $text): string
