@@ -17,20 +17,75 @@ add_action('rest_api_init', function () {
 });
 
 /**
- * Compute a basic Yoast-compatible SEO score (1–100) from post content and focus keyphrase.
+ * Return true if every word of $phrase appears somewhere in $text.
  *
- * Scoring mirrors Yoast's weighted checks:
- *   - Keyphrase in title            : 9 pts
- *   - Keyphrase in introduction      : 9 pts
- *   - Keyphrase in meta description  : 9 pts
- *   - Keyphrase in slug              : 6 pts
- *   - Keyphrase density 0.5%–3%      : 9 pts
- *   - Text length ≥ 300 words        : 9 pts
- *   - Meta description length ok     : 9 pts
- *   - Keyphrase present in content   : 3 pts  (fallback when density off)
+ * Mirrors Yoast's keyphrase-in-text check: it does NOT require the words to
+ * be contiguous — it only requires each word to be present at least once.
+ * Both arguments must already be lower-cased UTF-8 strings.
+ */
+function aeromorning_phrase_words_in_text(string $text, string $phrase): bool {
+    $words = array_filter(preg_split('/[\s\-]+/u', $phrase) ?: []);
+    if (empty($words)) {
+        return false;
+    }
+    foreach ($words as $word) {
+        if ($word !== '' && mb_strpos($text, $word, 0, 'UTF-8') === false) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Count words in a UTF-8 string (handles French accented characters).
+ * PHP's str_word_count() misses accented letters outside the current locale.
+ */
+function aeromorning_word_count(string $text): int {
+    return (int) preg_match_all('/\p{L}+/u', $text);
+}
+
+/**
+ * Count non-overlapping occurrences of each word of $phrase in $text, return
+ * the minimum (i.e. how many times the full keyphrase could have appeared).
+ */
+function aeromorning_phrase_occurrences(string $text, string $phrase): int {
+    $words = array_filter(preg_split('/[\s\-]+/u', $phrase) ?: []);
+    if (empty($words)) {
+        return 0;
+    }
+    $min = PHP_INT_MAX;
+    foreach ($words as $word) {
+        if ($word === '') {
+            continue;
+        }
+        $count = mb_substr_count($text, $word);
+        $min   = min($min, $count);
+    }
+    return $min === PHP_INT_MAX ? 0 : $min;
+}
+
+/**
+ * Compute a Yoast-compatible SEO score (1–100) using word-based matching.
+ *
+ * Yoast does NOT require the keyphrase words to be contiguous — it checks
+ * whether each word of the keyphrase appears in the target field.  Using
+ * exact-string (mb_strpos) matching would give falsely low scores for titles
+ * such as "Airbus lance officiellement le programme A321XLR" with keyphrase
+ * "Airbus A321XLR".
+ *
+ * Weighted checks (mirrors Yoast's scoring rubric):
+ *   - Keyphrase words in title         : 9 pts
+ *   - Keyphrase words in introduction  : 9 pts
+ *   - Keyphrase words in meta desc     : 9 pts
+ *   - Meta description length 50–156   : 9 pts  (3 pts if present but off)
+ *   - Keyphrase word(s) in slug        : 6 pts
+ *   - Text length ≥ 300 words          : 9 pts  (5 pts for 150–299)
+ *   - Keyphrase density 0.5%–3%        : 9 pts  (3 pts if present but off)
  *
  * Returns 0 when no focus keyword is provided.
- * Minimum returned value when keyword is set: 1 (avoids "Non disponible").
+ * Always returns ≥ 1 when a focus keyword is set (prevents "Non disponible").
+ * The real Yoast JS score will overwrite this value the next time an editor
+ * opens and saves the post.
  */
 function aeromorning_compute_seo_score(int $post_id, string $focuskw, string $metadesc): int {
     $focuskw = trim($focuskw);
@@ -47,24 +102,24 @@ function aeromorning_compute_seo_score(int $post_id, string $focuskw, string $me
     $title   = mb_strtolower(strip_tags((string) $post->post_title), 'UTF-8');
     $content = mb_strtolower(wp_strip_all_tags((string) $post->post_content), 'UTF-8');
     $desc    = mb_strtolower(trim($metadesc), 'UTF-8');
-    $slug    = (string) $post->post_name;
+    $slug    = mb_strtolower((string) $post->post_name, 'UTF-8');
 
-    $score    = 0;
-    $max      = 63; // sum of all achievable points
+    $score = 0;
+    $max   = 60; // sum of all achievable points
 
-    // Keyphrase in title (9 pts)
-    if (mb_strpos($title, $kw, 0, 'UTF-8') !== false) {
+    // Keyphrase words in title (9 pts)
+    if (aeromorning_phrase_words_in_text($title, $kw)) {
         $score += 9;
     }
 
-    // Keyphrase in introduction — first ~300 chars of content (9 pts)
+    // Keyphrase words in introduction — first ~300 chars (9 pts)
     $intro = mb_substr($content, 0, 300, 'UTF-8');
-    if ($intro !== '' && mb_strpos($intro, $kw, 0, 'UTF-8') !== false) {
+    if ($intro !== '' && aeromorning_phrase_words_in_text($intro, $kw)) {
         $score += 9;
     }
 
-    // Keyphrase in meta description (9 pts)
-    if ($desc !== '' && mb_strpos($desc, $kw, 0, 'UTF-8') !== false) {
+    // Keyphrase words in meta description (9 pts)
+    if ($desc !== '' && aeromorning_phrase_words_in_text($desc, $kw)) {
         $score += 9;
     }
 
@@ -76,25 +131,38 @@ function aeromorning_compute_seo_score(int $post_id, string $focuskw, string $me
         $score += 3;
     }
 
-    // Keyphrase in slug (6 pts)
-    $kw_slug = sanitize_title($focuskw);
-    if ($kw_slug !== '' && $slug !== '' && str_contains($slug, $kw_slug)) {
-        $score += 6;
+    // Keyphrase first word in slug (6 pts) — slug is the post URL segment
+    $kw_words = array_values(array_filter(preg_split('/[\s\-]+/u', $kw) ?: []));
+    if (! empty($kw_words) && $slug !== '') {
+        $slug_hits = 0;
+        foreach ($kw_words as $w) {
+            if ($w !== '' && str_contains($slug, sanitize_title($w))) {
+                $slug_hits++;
+            }
+        }
+        if ($slug_hits >= count($kw_words)) {
+            $score += 6;
+        } elseif ($slug_hits > 0) {
+            $score += 3;
+        }
     }
 
-    // Text length ≥ 300 words (9 pts; partial 5 pts for 150–299)
-    $word_count = str_word_count($content);
+    // Text length (9 pts ≥ 300 words; 5 pts for 150–299)
+    $word_count = aeromorning_word_count($content);
     if ($word_count >= 300) {
         $score += 9;
     } elseif ($word_count >= 150) {
         $score += 5;
     }
 
-    // Keyphrase density 0.5%–3% (9 pts; 3 pts if present but outside range)
-    $content_len = mb_strlen($content, 'UTF-8');
-    if ($content_len > 0 && mb_strlen($kw, 'UTF-8') > 0) {
-        $kw_occurrences = substr_count($content, $kw);
-        $density = ($kw_occurrences * mb_strlen($kw, 'UTF-8')) / $content_len * 100;
+    // Keyphrase density (9 pts for 0.5%–3%; 3 pts if present but outside range)
+    if ($word_count > 0) {
+        $kw_occurrences = aeromorning_phrase_occurrences($content, $kw);
+        $kw_word_count  = count($kw_words);
+        // Yoast density = (occurrences × keyphrase_word_count) / total_words × 100
+        $density = $kw_word_count > 0
+            ? ($kw_occurrences * $kw_word_count) / $word_count * 100
+            : 0.0;
         if ($density >= 0.5 && $density <= 3.0) {
             $score += 9;
         } elseif ($kw_occurrences > 0) {
@@ -102,7 +170,7 @@ function aeromorning_compute_seo_score(int $post_id, string $focuskw, string $me
         }
     }
 
-    // Normalise to 1–100 (always at least 1 when focus keyword is provided)
+    // Normalise to 1–100 (always ≥ 1 when focus keyword is provided)
     $normalized = (int) round(($score / $max) * 100);
     return max(1, min(100, $normalized));
 }
@@ -159,7 +227,11 @@ function aeromorning_update_yoast_meta(WP_REST_Request $request): WP_REST_Respon
         $updated['seo_score_source'] = 'explicit';
     } elseif ($focuskw !== null) {
         $existing_score = (int) get_post_meta($post_id, '_yoast_wpseo_linkdex', true);
-        if ($existing_score === 0) {
+        // Compute when: score is missing (0) OR an explicit reindex was requested.
+        // Do NOT override when the score was set by Yoast JS (real score, existing_score > 0
+        // and reindex=false) so that a manual editor save is never downgraded.
+        $should_compute = ($existing_score === 0) || $reindex;
+        if ($should_compute) {
             $computed_score = aeromorning_compute_seo_score(
                 $post_id,
                 $focuskw,
