@@ -141,8 +141,11 @@ class WordPressPostingService
             Log::info("News #{$news->id} published to WordPress — WP post ID: {$wpPostId}");
             $this->persistWordPressPostMapping($news, $wpPostId);
 
-            // Step 3 — update Yoast SEO meta
-            $details['steps']['yoast_meta'] = $this->updateYoastMetaDetailed($wpPostId, $news);
+            // Step 3 — update Yoast SEO meta + rebuild indexable
+            // Pass requestReindex=true so the mu-plugin calls build_for_id_and_type()
+            // after writing the meta (including the computed _yoast_wpseo_linkdex).
+            // Without reindex the Yoast admin column stays "Non disponible".
+            $details['steps']['yoast_meta'] = $this->updateYoastMetaDetailed($wpPostId, $news, true);
 
             return ['success' => true, 'wp_post_id' => $wpPostId, 'error' => null, 'details' => $details];
 
