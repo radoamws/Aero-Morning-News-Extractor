@@ -551,9 +551,11 @@ EXEMPLE VALIDE :
 
         $excerpt = mb_substr($plainContent, 0, 4000);
 
-        $prompt = "You are filtering incoming emails for an aviation news workflow.\n"
-            . "Decide whether the content below contains a real aviation, aerospace, airline, airport, aircraft, defense aviation, air transport, drone, aviation industry, cargo, cyber security, evtol, innovation, Artificial Intelligence, naval, satellite or space news article that is relevant for publication.\n"
-            . "Reject emails that are mainly signatures, admin exchanges, personal messages, legal notices, generic business messages, marketing unrelated to aviation or drone, or content without a real publishable aviation news story.\n"
+        $prompt = "You are filtering incoming emails for an aviation and aerospace news publication workflow.\n"
+            . "Answer YES if the email contains any real news, article, press release, announcement, or editorial content related to ANY of the following topics:\n"
+            . "aviation, aerospace, airline, airport, aircraft, flight operations, air transport, cargo, freight, defense (military aviation, naval aviation, defense industry), drone / UAV, eVTOL / urban air mobility, satellite, space, rocket, orbital, helicopter, engine, MRO, certification (EASA, FAA, TCCA, ANAC), safety, regulation, environment / sustainability / emissions / SAF, innovation, technology, digitalization, artificial intelligence in aviation, cybersecurity in aviation, industry news, nominations / appointments / leadership changes in aviation companies, aviation jobs / employment, aviation competitions / awards, industry events / airshows.\n"
+            . "Answer NO only if the email is clearly spam, a transactional notification (Airtable, Jira, Slack, billing, SaaS tool alerts), a personal/private exchange with no news content, a purely administrative or legal notice, or marketing completely unrelated to aviation or aerospace.\n"
+            . "When in doubt, answer YES.\n"
             . "Return only one word: YES or NO.\n\n"
             . $excerpt;
 
@@ -1635,11 +1637,35 @@ EXEMPLE VALIDE :
         $content = mb_strtolower($content);
 
         $keywords = [
+            // Core aviation
             'aviation', 'aeronaut', 'aerosp', 'airline', 'airport', 'aircraft', 'flight', 'fleet',
-            'boeing', 'airbus', 'embraer', 'atr', 'engine', 'faa', 'easa', 'iata', 'icao',
-            'nasa', 'spacex', 'satellite', 'rocket', 'launch', 'orbital', 'lunar', 'air cargo',
+            // OEMs & regulators
+            'boeing', 'airbus', 'embraer', 'atr', 'safran', 'rolls-royce', 'pratt', 'ge aviation',
+            'engine', 'faa', 'easa', 'iata', 'icao', 'dgac',
+            // Space
+            'nasa', 'spacex', 'satellite', 'rocket', 'launch', 'orbital', 'lunar', 'spatial', 'espace',
+            // Rotary & urban air
+            'helicopter', 'helicoptere', 'hélicoptère', 'evtol', 'vtol', 'urban air',
+            // Cargo & transport
+            'air cargo', 'fret aerien', 'fret aérien', 'cargo', 'freight',
+            // French aviation terms
             'transport aerien', 'transport aérien', 'compagnie aerienne', 'compagnie aérienne',
-            'aeroport', 'aéroport', 'avion', 'vol', 'espace', 'spatial', 'helicopter', 'helicoptere', 'hélicoptère'
+            'aeroport', 'aéroport', 'avion', 'vol ',
+            // Defense & naval
+            'defense', 'défense', 'militaire', 'naval', 'armée de l\'air', 'air force',
+            // Drone
+            'drone', 'uav', 'uas',
+            // Technology & innovation
+            'technolog', 'innovation', 'innovant', 'numérique', 'digital', 'intelligence artificielle',
+            'artificial intelligence', 'cybersecur', 'industrie 4',
+            // Environment & sustainability
+            'durabilit', 'sustainability', 'saf ', 'carburant durable', 'émission', 'emission',
+            'environnement', 'décarbonation', 'net zero',
+            // Industry & certification
+            'certif', 'homologat', 'mro', 'maintenance', 'industrie aeronautique', 'industrie aéronautique',
+            // People & events
+            'nomination', 'nommé', 'nommée', 'directeur général', 'ceo', 'président',
+            'emploi', 'recrutement', 'hiring', 'concours', 'award', 'airshow', 'salon du bourget', 'paris air',
         ];
 
         $score = 0;
@@ -1649,7 +1675,7 @@ EXEMPLE VALIDE :
             }
         }
 
-        return $score >= 2;
+        return $score >= 1;
     }
 
     /**
