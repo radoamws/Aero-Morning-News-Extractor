@@ -2,11 +2,15 @@
 
 use App\Http\Controllers\NewsController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\CloudflareCacheController;
 use App\Http\Controllers\ProcessLogController;
 use App\Http\Controllers\WordPressPostingController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/auth/login', [AuthController::class, 'login']);
+
+// Cloudflare cache purge — cron-accessible, protected by CLOUDFLARE_PURGE_CRON_SECRET
+Route::post('/cloudflare/purge-homepage-cron', [CloudflareCacheController::class, 'purgeHomepageCron']);
 
 // WordPress synchronization
 Route::middleware('auth:sanctum')->group(function () {
@@ -42,4 +46,7 @@ Route::middleware('auth:sanctum')->group(function () {
 	// Process logs
 	Route::get('/process-logs', [ProcessLogController::class, 'index']);
 	Route::get('/process-logs/{id}', [ProcessLogController::class, 'show']);
+
+	// Cloudflare cache purge (dashboard button)
+	Route::post('/cloudflare/purge-homepage', [CloudflareCacheController::class, 'purgeHomepage']);
 });

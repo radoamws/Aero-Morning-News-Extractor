@@ -306,6 +306,22 @@ export const useNewsStore = defineStore("news", {
         this.actionLoading = false;
       }
     },
+    async runPurgeCloudflare() {
+      const { request } = useApi();
+      this.actionLoading = true;
+      try {
+        const result = await request<{ message: string; urls?: string[]; skipped?: boolean }>(
+          "/cloudflare/purge-homepage",
+          { method: "POST" }
+        );
+        const urlsText = result.urls?.length ? ` (${result.urls.join(", ")})` : "";
+        this.setMessage((result.message || "Cache Cloudflare purgé") + urlsText);
+      } catch (error: any) {
+        this.setError(error?.data?.message || "Echec purge cache Cloudflare");
+      } finally {
+        this.actionLoading = false;
+      }
+    },
     async runRepushSeoMeta(limit = 200, resumeAfterNewsId?: number | null) {
       const { request } = useApi();
       this.actionLoading = true;

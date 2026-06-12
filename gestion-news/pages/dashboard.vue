@@ -182,6 +182,9 @@ onMounted(async () => {
         <button class="btn btn-primary" :disabled="actionLoading" @click="newsStore.runPublishPending()">
           Publish Pending News
         </button>
+        <button class="btn btn-ghost" :disabled="actionLoading" @click="newsStore.runPurgeCloudflare()">
+          Purge Cache Cloudflare
+        </button>
         <label>
           <span>Batch SEO</span>
           <input v-model.number="seoRepushLimit" type="number" min="1" max="1000" style="width: 120px;" />

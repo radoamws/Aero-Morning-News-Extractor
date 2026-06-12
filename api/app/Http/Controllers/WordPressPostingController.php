@@ -356,6 +356,12 @@ class WordPressPostingController extends Controller
             // Send summary email
             $this->sendPublishSummaryEmail($results);
 
+            // Purge Cloudflare homepage cache once, after all articles are processed
+            $cfPurgeResult = null;
+            if (count($results['success']) > 0) {
+                $cfPurgeResult = app(\App\Services\CloudflareService::class)->purgeHomepage();
+            }
+
             if ($processLog) {
                 $failedCount = count($results['failed']);
                 $status = $failedCount > 0
@@ -382,6 +388,7 @@ class WordPressPostingController extends Controller
                 'failed'    => count($results['failed']),
                 'aborted_due_to_time_budget' => $abortedDueToTimeBudget,
                 'details'   => $results,
+                'cloudflare_purge' => $cfPurgeResult,
             ]);
 
         } catch (\Throwable $e) {

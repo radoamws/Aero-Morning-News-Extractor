@@ -552,7 +552,7 @@ EXEMPLE VALIDE :
         $excerpt = mb_substr($plainContent, 0, 4000);
 
         $prompt = "You are filtering incoming emails for an aviation and aerospace news publication workflow.\n"
-            . "Answer YES if the email contains any real news, article, press release, announcement, or editorial content related to ANY of the following topics:\n"
+            . "Answer YES if the email contains any real news, article, press release, announcement, nomination, robotics or editorial content related to ANY of the following topics:\n"
             . "aviation, aerospace, airline, airport, aircraft, flight operations, air transport, cargo, freight, defense (military aviation, naval aviation, defense industry), drone / UAV, eVTOL / urban air mobility, satellite, space, rocket, orbital, helicopter, engine, MRO, certification (EASA, FAA, TCCA, ANAC), safety, regulation, environment / sustainability / emissions / SAF, innovation, technology, digitalization, artificial intelligence in aviation, cybersecurity in aviation, industry news, nominations / appointments / leadership changes in aviation companies, aviation jobs / employment, aviation competitions / awards, industry events / airshows.\n"
             . "Answer NO only if the email is clearly spam, a transactional notification (Airtable, Jira, Slack, billing, SaaS tool alerts), a personal/private exchange with no news content, a purely administrative or legal notice, or marketing completely unrelated to aviation or aerospace.\n"
             . "When in doubt, answer YES.\n"
