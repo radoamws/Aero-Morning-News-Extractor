@@ -522,14 +522,22 @@ class NewsController extends Controller
     private function storeIgnoredEmail(array $emailContent, string $excerpt, string $reason): bool
     {
         try {
-            DB::transaction(function () use ($emailContent, $excerpt, $reason): void {
+            // Store full email content (without binary attachments) for potential force-publish later.
+            $rawForStorage = array_diff_key($emailContent, ['attachments' => true]);
+            $rawEmailJson = json_encode($rawForStorage, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if (!is_string($rawEmailJson)) {
+                $rawEmailJson = null;
+            }
+
+            DB::transaction(function () use ($emailContent, $excerpt, $reason, $rawEmailJson): void {
                 IgnoredEmail::create([
-                    'message_id' => (string) ($emailContent['message_id'] ?? ''),
-                    'subject' => (string) ($emailContent['subject'] ?? ''),
-                    'sender' => (string) ($emailContent['from'] ?? ''),
-                    'reason' => $reason,
-                    'excerpt' => mb_substr(trim($excerpt), 0, 5000),
-                    'processed_at' => now(),
+                    'message_id'     => (string) ($emailContent['message_id'] ?? ''),
+                    'subject'        => (string) ($emailContent['subject'] ?? ''),
+                    'sender'         => (string) ($emailContent['from'] ?? ''),
+                    'reason'         => $reason,
+                    'excerpt'        => mb_substr(trim($excerpt), 0, 5000),
+                    'raw_email_json' => $rawEmailJson,
+                    'processed_at'   => now(),
                 ]);
             });
 
@@ -538,6 +546,243 @@ class NewsController extends Controller
             Log::warning('Unable to persist ignored email: ' . $e->getMessage());
             return false;
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Ignored emails — public API
+    // -------------------------------------------------------------------------
+
+    public function getIgnoredEmails(Request $request): JsonResponse
+    {
+        try {
+            $query = IgnoredEmail::query();
+
+            if ($request->filled('q')) {
+                $search = (string) $request->input('q');
+                $query->where(function ($sub) use ($search) {
+                    $sub->where('subject', 'like', "%{$search}%")
+                        ->orWhere('sender', 'like', "%{$search}%");
+                });
+            }
+
+            if ($request->filled('reason')) {
+                $query->where('reason', (string) $request->input('reason'));
+            }
+
+            if ($request->filled('force_published')) {
+                if ((string) $request->input('force_published') === '1') {
+                    $query->whereNotNull('force_published_at');
+                } else {
+                    $query->whereNull('force_published_at');
+                }
+            }
+
+            $sortDir = strtolower((string) $request->input('sort_dir', 'desc'));
+            $sortDir = in_array($sortDir, ['asc', 'desc'], true) ? $sortDir : 'desc';
+
+            $perPage = max(1, min((int) $request->input('per_page', 20), 100));
+
+            $paginated = $query
+                ->orderBy('created_at', $sortDir)
+                ->select(['id', 'message_id', 'subject', 'sender', 'reason', 'excerpt', 'processed_at', 'force_published_at', 'created_at'])
+                ->paginate($perPage);
+
+            return response()->json([
+                'success' => true,
+                'data' => $paginated->items(),
+                'pagination' => [
+                    'current_page' => $paginated->currentPage(),
+                    'last_page'    => $paginated->lastPage(),
+                    'per_page'     => $paginated->perPage(),
+                    'total'        => $paginated->total(),
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('Error fetching ignored emails: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function forcePublishIgnoredEmail(int $id): JsonResponse
+    {
+        $this->ensureEmailProcessingServices();
+
+        $ignoredEmail = IgnoredEmail::find($id);
+        if (!$ignoredEmail) {
+            return response()->json(['success' => false, 'message' => 'Ignored email not found'], 404);
+        }
+
+        // Reconstruct emailContent from stored JSON, or build a minimal fallback.
+        if (!empty($ignoredEmail->raw_email_json)) {
+            $emailContent = json_decode($ignoredEmail->raw_email_json, true);
+            if (!is_array($emailContent)) {
+                return response()->json(['success' => false, 'message' => 'Stored raw_email_json is invalid JSON'], 422);
+            }
+        } else {
+            // Old record without raw_email_json — best-effort with excerpt as text body.
+            $emailContent = [
+                'subject'   => (string) ($ignoredEmail->subject ?? ''),
+                'from'      => (string) ($ignoredEmail->sender ?? ''),
+                'message_id' => (string) ($ignoredEmail->message_id ?? ''),
+                'html_body' => '',
+                'text_body' => (string) ($ignoredEmail->excerpt ?? ''),
+            ];
+        }
+
+        // Guarantee a non-empty message_id to ensure uniqueness in the News table.
+        if (empty($emailContent['message_id'])) {
+            $emailContent['message_id'] = 'force:' . $id;
+        }
+
+        try {
+            $result = $this->buildNewsFromEmailContent($emailContent);
+
+            if (!$result['success']) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $result['error'] ?? 'Failed to create news records',
+                ], 422);
+            }
+
+            // Publish each created News record to WordPress.
+            $publishResults = ['success' => [], 'failed' => []];
+            foreach ($result['created_ids'] as $newsId) {
+                $news = News::find($newsId);
+                if (!$news) {
+                    continue;
+                }
+                try {
+                    $service    = new \App\Services\WordPressPostingService($news->lang);
+                    $wpResult   = $service->publishToWordPress($news);
+                    if ($wpResult['success']) {
+                        $news->status = News::STATUS_SYNCED;
+                        $news->save();
+                        $publishResults['success'][] = [
+                            'news_id'    => $newsId,
+                            'lang'       => $news->lang,
+                            'wp_post_id' => $wpResult['wp_post_id'],
+                        ];
+                    } else {
+                        $publishResults['failed'][] = [
+                            'news_id' => $newsId,
+                            'lang'    => $news->lang,
+                            'error'   => $wpResult['error'] ?? 'Unknown WP error',
+                        ];
+                    }
+                } catch (\Throwable $e) {
+                    Log::error("forcePublish WP error for news #{$newsId}: " . $e->getMessage());
+                    $publishResults['failed'][] = [
+                        'news_id' => $newsId,
+                        'lang'    => $news->lang ?? '?',
+                        'error'   => $e->getMessage(),
+                    ];
+                }
+            }
+
+            // Mark the ignored email as force-published regardless of WP partial failure.
+            $ignoredEmail->force_published_at = now();
+            $ignoredEmail->save();
+
+            // Purge Cloudflare homepage if at least one article was published.
+            if (count($publishResults['success']) > 0) {
+                app(\App\Services\CloudflareService::class)->purgeHomepage();
+            }
+
+            return response()->json([
+                'success'        => true,
+                'message'        => 'Force publish completed.',
+                'created_news'   => $result['created_ids'],
+                'publish_results' => $publishResults,
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error("forcePublishIgnoredEmail #{$id}: " . $e->getMessage());
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    private function buildNewsFromEmailContent(array $emailContent): array
+    {
+        $contentBrut = json_encode($emailContent, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($contentBrut)) {
+            $contentBrut = '';
+        }
+
+        // Skip emails that already produced News records in both languages.
+        $existingLangs = [];
+        if (!empty($emailContent['message_id'])) {
+            $existingLangs = News::where('email_message_id', $emailContent['message_id'])
+                ->pluck('lang')
+                ->toArray();
+        }
+
+        if (in_array('FR', $existingLangs, true) && in_array('EN', $existingLangs, true)) {
+            return ['success' => false, 'error' => 'News already exist for both languages', 'created_ids' => []];
+        }
+
+        $htmlBody  = (string) ($emailContent['html_body'] ?? '');
+        $textBody  = (string) ($emailContent['text_body'] ?? '');
+        $bodyContent = trim($htmlBody) !== '' ? $htmlBody : $textBody;
+        $normalizedBodyContent   = $this->normalizeEmailBody($bodyContent);
+        $languageDetectionText   = $this->normalizePlainTextContent(strip_tags($normalizedBodyContent));
+
+        // Image: HTML candidates only (no IMAP attachment access during force-publish).
+        $imageUrl = null;
+        $imageCandidates = $this->emailService->extractImageCandidatesFromHtml($normalizedBodyContent);
+        $imageCandidates = array_values(array_filter(
+            $imageCandidates,
+            fn ($url) => !$this->isForbiddenSignatureImageUrl((string) $url)
+        ));
+
+        if (!empty($imageCandidates)) {
+            $foundImageUrl = $this->openaiService->chooseRelevantImageUrl(
+                $languageDetectionText !== '' ? $languageDetectionText : $normalizedBodyContent,
+                $imageCandidates
+            );
+            if (
+                $foundImageUrl
+                && !$this->isForbiddenSignatureImageUrl($foundImageUrl)
+                && $this->imageService->isValidImageUrl($foundImageUrl)
+            ) {
+                $imageUrl = $this->imageService->downloadAndOptimizeImage(
+                    $foundImageUrl,
+                    $emailContent['subject'] ?? ''
+                );
+            }
+        }
+
+        $newsPayload = $this->openaiService->extractWordPressNewsJson($emailContent);
+        if (!is_array($newsPayload)) {
+            return ['success' => false, 'error' => 'OpenAI did not return a valid JSON payload', 'created_ids' => []];
+        }
+
+        $createdIds = [];
+        $messageId  = (string) ($emailContent['message_id'] ?? '');
+        $subject    = (string) ($emailContent['subject'] ?? '');
+
+        if (($newsPayload['FR'] ?? '') !== '' && !in_array('FR', $existingLangs, true)) {
+            if ($this->processFrenchNews($newsPayload, $subject, $messageId, $imageUrl, $contentBrut)) {
+                $news = News::where('email_message_id', $messageId)->where('lang', 'FR')->latest('id')->first();
+                if ($news) {
+                    $createdIds[] = $news->id;
+                }
+            }
+        }
+
+        if (($newsPayload['EN'] ?? '') !== '' && !in_array('EN', $existingLangs, true)) {
+            if ($this->processEnglishNews($newsPayload, $subject, $messageId, $imageUrl, $contentBrut)) {
+                $news = News::where('email_message_id', $messageId)->where('lang', 'EN')->latest('id')->first();
+                if ($news) {
+                    $createdIds[] = $news->id;
+                }
+            }
+        }
+
+        if (empty($createdIds)) {
+            return ['success' => false, 'error' => 'No news records created from the email content', 'created_ids' => []];
+        }
+
+        return ['success' => true, 'created_ids' => $createdIds];
     }
 
     private function sendProcessingSummaryEmail(array $summary): void

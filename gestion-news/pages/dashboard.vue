@@ -24,7 +24,11 @@ const {
   processLogs,
   processLogsLoading,
   seoRepushStatus,
-  yoastReindexStatus
+  yoastReindexStatus,
+  ignoredEmails,
+  ignoredEmailsLoading,
+  ignoredEmailsPagination,
+  ignoredEmailsFilters
 } = storeToRefs(newsStore);
 
 const wpUser = ref("");
@@ -155,13 +159,24 @@ watch(
   { immediate: true }
 );
 
+const applyIgnoredFilters = async () => {
+  await newsStore.fetchIgnoredEmails(1);
+};
+
+const clearIgnoredFilters = async () => {
+  ignoredEmailsFilters.value.q = "";
+  ignoredEmailsFilters.value.force_published = "";
+  await newsStore.fetchIgnoredEmails(1);
+};
+
 onMounted(async () => {
   await Promise.all([
     newsStore.fetchNews(),
     newsStore.fetchStats(),
     newsStore.fetchProcessLogs(),
     newsStore.fetchSeoRepushStatus(),
-    newsStore.fetchYoastReindexStatus()
+    newsStore.fetchYoastReindexStatus(),
+    newsStore.fetchIgnoredEmails(1)
   ]);
 });
 </script>
@@ -595,6 +610,109 @@ onMounted(async () => {
       <div style="margin-top: 1.5rem;">
         <h3 style="font-size: 0.9rem; margin: 0.5rem 0; color: #666; text-transform: uppercase; letter-spacing: 0.05em;">HTML Content Preview</h3>
         <div class="preview" v-html="preview" />
+      </div>
+    </article>
+
+    <!-- Mails Ignorés -->
+    <article class="panel">
+      <h2>Mails Ignorés</h2>
+      <p class="muted">Emails rejetés par le filtre de pertinence. Le bouton "Force Publish" re-traite le mail et le publie directement.</p>
+
+      <div class="toolbar-grid">
+        <label>
+          <span>Recherche (sujet / expéditeur)</span>
+          <input v-model="ignoredEmailsFilters.q" type="text" placeholder="sujet ou adresse..." />
+        </label>
+        <label>
+          <span>Statut</span>
+          <select v-model="ignoredEmailsFilters.force_published">
+            <option value="">Tous</option>
+            <option value="0">Non publiés</option>
+            <option value="1">Déjà force-publiés</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-primary" :disabled="ignoredEmailsLoading" @click="applyIgnoredFilters">Appliquer</button>
+        <button class="btn btn-ghost" :disabled="ignoredEmailsLoading" @click="clearIgnoredFilters">Reset</button>
+        <button class="btn btn-ghost" :disabled="ignoredEmailsLoading" @click="newsStore.fetchIgnoredEmails(ignoredEmailsPagination.current_page)">Rafraîchir</button>
+      </div>
+
+      <div class="actions-row between" style="margin-top: 8px;">
+        <p class="muted">Total : {{ ignoredEmailsPagination.total }} | Page {{ ignoredEmailsPagination.current_page }} / {{ ignoredEmailsPagination.last_page }}</p>
+      </div>
+
+      <div class="table-wrap">
+        <table style="min-width: 960px;">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Sujet</th>
+              <th>Expéditeur</th>
+              <th>Raison</th>
+              <th>Ignoré le</th>
+              <th>Force-publié</th>
+              <th>Aperçu</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="ignoredEmailsLoading">
+              <td colspan="8">Chargement...</td>
+            </tr>
+            <tr v-else-if="!ignoredEmailsLoading && ignoredEmails.length === 0">
+              <td colspan="8">Aucun mail ignoré</td>
+            </tr>
+            <tr v-for="item in ignoredEmails" :key="item.id">
+              <td>{{ item.id }}</td>
+              <td class="truncate" :title="item.subject ?? ''">{{ item.subject || '-' }}</td>
+              <td class="truncate" :title="item.sender ?? ''">{{ item.sender || '-' }}</td>
+              <td><span class="pill">{{ item.reason }}</span></td>
+              <td>{{ item.processed_at ? new Date(item.processed_at).toLocaleString('fr-FR') : '-' }}</td>
+              <td>
+                <span v-if="item.force_published_at" class="pill status-2" :title="new Date(item.force_published_at).toLocaleString('fr-FR')">
+                  oui
+                </span>
+                <span v-else class="pill status-0">non</span>
+              </td>
+              <td>
+                <details v-if="item.excerpt">
+                  <summary class="muted" style="cursor:pointer;">voir</summary>
+                  <pre style="white-space: pre-wrap; font-size: 0.8rem; max-height: 120px; overflow: auto; margin: 4px 0 0;">{{ item.excerpt }}</pre>
+                </details>
+                <span v-else class="muted">-</span>
+              </td>
+              <td>
+                <button
+                  class="btn btn-mini btn-warning"
+                  :disabled="actionLoading || !!item.force_published_at"
+                  :title="item.force_published_at ? 'Déjà force-publié' : 'Re-traiter et publier ce mail'"
+                  @click="newsStore.forcePublishIgnoredEmail(item.id)"
+                >
+                  {{ item.force_published_at ? 'Déjà publié' : 'Force Publish' }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="actions-row between">
+        <button
+          class="btn btn-ghost"
+          :disabled="ignoredEmailsPagination.current_page <= 1"
+          @click="newsStore.fetchIgnoredEmails(ignoredEmailsPagination.current_page - 1)"
+        >
+          Page précédente
+        </button>
+        <button
+          class="btn btn-ghost"
+          :disabled="ignoredEmailsPagination.current_page >= ignoredEmailsPagination.last_page"
+          @click="newsStore.fetchIgnoredEmails(ignoredEmailsPagination.current_page + 1)"
+        >
+          Page suivante
+        </button>
       </div>
     </article>
 

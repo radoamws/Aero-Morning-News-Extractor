@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import type { NewsFilters, NewsItem, PaginatedNews } from "~/types/news";
+import type { IgnoredEmailItem, NewsFilters, NewsItem, PaginatedNews } from "~/types/news";
 import type { PaginatedProcessLogs, ProcessLogItem } from "~/types/processLog";
 import { useApi } from "~/composables/useApi";
 
@@ -47,6 +47,20 @@ export const useNewsStore = defineStore("news", {
     processLogsLoading: false,
     seoRepushStatus: null as null | Record<string, any>,
     yoastReindexStatus: null as null | Record<string, any>,
+
+    ignoredEmails: [] as IgnoredEmailItem[],
+    ignoredEmailsLoading: false,
+    ignoredEmailsPagination: {
+      current_page: 1,
+      last_page: 1,
+      per_page: 20,
+      total: 0
+    },
+    ignoredEmailsFilters: {
+      q: "",
+      force_published: "" as "" | "0" | "1"
+    },
+
     processLogsPagination: {
       current_page: 1,
       last_page: 1,
@@ -530,6 +544,54 @@ export const useNewsStore = defineStore("news", {
         this.setMessage(`Preview loaded for news ${id}`);
       } catch (error: any) {
         this.setError(error?.data?.message || "Failed to load preview");
+      } finally {
+        this.actionLoading = false;
+      }
+    },
+    async fetchIgnoredEmails(page = 1) {
+      const { request } = useApi();
+      this.ignoredEmailsLoading = true;
+      try {
+        const params = new URLSearchParams();
+        params.set("page", String(page));
+        params.set("per_page", String(this.ignoredEmailsPagination.per_page));
+        params.set("sort_dir", "desc");
+        if (this.ignoredEmailsFilters.q) {
+          params.set("q", this.ignoredEmailsFilters.q);
+        }
+        if (this.ignoredEmailsFilters.force_published !== "") {
+          params.set("force_published", this.ignoredEmailsFilters.force_published);
+        }
+
+        const result = await request<{
+          data: IgnoredEmailItem[];
+          pagination: { current_page: number; last_page: number; per_page: number; total: number };
+        }>(`/ignored-emails?${params.toString()}`);
+
+        this.ignoredEmails = result.data;
+        this.ignoredEmailsPagination = result.pagination;
+      } catch (error: any) {
+        this.setError(error?.data?.message || "Echec chargement mails ignorés");
+      } finally {
+        this.ignoredEmailsLoading = false;
+      }
+    },
+    async forcePublishIgnoredEmail(id: number) {
+      const { request } = useApi();
+      this.actionLoading = true;
+      try {
+        const result = await request<{
+          message: string;
+          created_news: number[];
+          publish_results: { success: any[]; failed: any[] };
+        }>(`/ignored-emails/${id}/force-publish`, { method: "POST" });
+
+        const ok  = result.publish_results?.success?.length ?? 0;
+        const nok = result.publish_results?.failed?.length ?? 0;
+        this.setMessage(`${result.message} (publiés: ${ok}, échecs: ${nok})`);
+        await this.fetchIgnoredEmails(this.ignoredEmailsPagination.current_page);
+      } catch (error: any) {
+        this.setError(error?.data?.message || "Echec force publish");
       } finally {
         this.actionLoading = false;
       }

@@ -30,6 +30,10 @@ Route::middleware('auth:sanctum')->group(function () {
 	Route::patch('/news/{id}/status/{status}', [NewsController::class, 'updateNewsStatus']);
 	Route::patch('/news/bulk/status/{status}', [NewsController::class, 'bulkUpdateNewsStatus']);
 
+	// Ignored emails
+	Route::get('/ignored-emails', [NewsController::class, 'getIgnoredEmails']);
+	Route::post('/ignored-emails/{id}/force-publish', [NewsController::class, 'forcePublishIgnoredEmail']);
+
 	// WordPress posting
 	Route::post('/news/{id}/post-to-wordpress', [WordPressPostingController::class, 'postNews']);
 	Route::post('/news/bulk-post-to-wordpress', [WordPressPostingController::class, 'bulkPostNews']);

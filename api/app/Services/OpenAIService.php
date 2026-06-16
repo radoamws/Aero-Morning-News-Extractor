@@ -1812,7 +1812,7 @@ EXEMPLE VALIDE :
                 }
 
                 return null;
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 $message = $e->getMessage();
                 Log::error('OpenAI API error: ' . $message);
 

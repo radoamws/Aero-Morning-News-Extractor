@@ -14,12 +14,15 @@ class IgnoredEmail extends Model
         'sender',
         'reason',
         'excerpt',
+        'raw_email_json',
+        'force_published_at',
         'processed_at',
     ];
 
     protected $casts = [
-        'processed_at' => 'datetime',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime',
+        'processed_at'      => 'datetime',
+        'force_published_at' => 'datetime',
+        'created_at'        => 'datetime',
+        'updated_at'        => 'datetime',
     ];
 }

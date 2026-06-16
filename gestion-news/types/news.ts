@@ -22,6 +22,18 @@ export type PaginatedNews = {
   total: number;
 };
 
+export type IgnoredEmailItem = {
+  id: number;
+  message_id: string | null;
+  subject: string | null;
+  sender: string | null;
+  reason: string;
+  excerpt: string | null;
+  processed_at: string | null;
+  force_published_at: string | null;
+  created_at: string;
+};
+
 export type NewsFilters = {
   q: string;
   status: "" | "0" | "1" | "2";

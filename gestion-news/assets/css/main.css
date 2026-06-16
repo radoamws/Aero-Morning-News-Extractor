@@ -210,6 +210,14 @@ select {
   color: #173247;
 }
 
+.btn-warning {
+  background: #d97706;
+  color: #fff;
+}
+.btn-warning:hover:not(:disabled) {
+  background: #b45309;
+}
+
 .btn-mini {
   background: #ebf4fb;
   color: #173247;
