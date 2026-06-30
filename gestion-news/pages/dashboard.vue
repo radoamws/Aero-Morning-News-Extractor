@@ -2,6 +2,7 @@
 import { storeToRefs } from "pinia";
 import { computed, onMounted, ref, watch } from "vue";
 import { useNewsStore } from "~/stores/news";
+import { useApi } from "~/composables/useApi";
 
 
 const newsStore = useNewsStore();
@@ -169,6 +170,94 @@ const clearIgnoredFilters = async () => {
   await newsStore.fetchIgnoredEmails(1);
 };
 
+// ─── LinkedIn config ───────────────────────────────────────────────────────
+const { request: apiRequest } = useApi();
+
+const linkedinSettings = ref<{
+  token_configured: boolean;
+  token_expires_at: string | null;
+  author_urn: string | null;
+  author_name: string | null;
+} | null>(null);
+const linkedinProfile = ref<{ name: string; sub: string; author_urn: string } | null>(null);
+const linkedinLoading = ref(false);
+const linkedinMsg = ref("");
+const linkedinErr = ref("");
+
+const fetchLinkedinSettings = async () => {
+  try {
+    linkedinSettings.value = await apiRequest("/linkedin/settings");
+  } catch (_) { /* not yet configured */ }
+};
+
+const openLinkedinAuth = async () => {
+  linkedinLoading.value = true;
+  linkedinMsg.value = "";
+  linkedinErr.value = "";
+  try {
+    const result = await apiRequest<{ url: string }>("/linkedin/auth");
+    window.open(result.url, "linkedin_oauth", "width=620,height=720,noopener");
+    linkedinMsg.value = "Fenêtre LinkedIn ouverte. Autorisez l'application puis revenez ici et cliquez 'Vérifier le token'.";
+  } catch (e: any) {
+    linkedinErr.value = e?.data?.message || "Erreur lors de la génération de l'URL OAuth";
+  } finally {
+    linkedinLoading.value = false;
+  }
+};
+
+const checkLinkedinToken = async () => {
+  linkedinLoading.value = true;
+  linkedinMsg.value = "";
+  linkedinErr.value = "";
+  try {
+    linkedinSettings.value = await apiRequest("/linkedin/settings");
+    if (linkedinSettings.value?.token_configured) {
+      linkedinMsg.value = "Token détecté ! Passez à l'étape suivante.";
+    } else {
+      linkedinErr.value = "Token non encore enregistré. Autorisez l'application LinkedIn d'abord (Étape 1).";
+    }
+  } catch (e: any) {
+    linkedinErr.value = e?.data?.message || "Erreur";
+  } finally {
+    linkedinLoading.value = false;
+  }
+};
+
+const fetchLinkedinProfile = async () => {
+  linkedinLoading.value = true;
+  linkedinMsg.value = "";
+  linkedinErr.value = "";
+  try {
+    const result = await apiRequest<{ name: string; sub: string; author_urn: string }>("/linkedin/auth-info");
+    linkedinProfile.value = result;
+    linkedinMsg.value = `Profil récupéré : ${result.name} (${result.author_urn})`;
+  } catch (e: any) {
+    linkedinErr.value = e?.data?.message || "Erreur lors de la récupération du profil";
+  } finally {
+    linkedinLoading.value = false;
+  }
+};
+
+const saveLinkedinUrn = async () => {
+  if (!linkedinProfile.value?.author_urn) return;
+  linkedinLoading.value = true;
+  linkedinMsg.value = "";
+  linkedinErr.value = "";
+  try {
+    await apiRequest("/linkedin/save-urn", {
+      method: "POST",
+      body: { urn: linkedinProfile.value.author_urn, name: linkedinProfile.value.name },
+    });
+    linkedinMsg.value = "✅ URN sauvegardé ! Vous pouvez maintenant publier des articles via le bouton LinkedIn de la liste.";
+    await fetchLinkedinSettings();
+  } catch (e: any) {
+    linkedinErr.value = e?.data?.message || "Erreur lors de la sauvegarde";
+  } finally {
+    linkedinLoading.value = false;
+  }
+};
+// ──────────────────────────────────────────────────────────────────────────
+
 onMounted(async () => {
   await Promise.all([
     newsStore.fetchNews(),
@@ -176,7 +265,8 @@ onMounted(async () => {
     newsStore.fetchProcessLogs(),
     newsStore.fetchSeoRepushStatus(),
     newsStore.fetchYoastReindexStatus(),
-    newsStore.fetchIgnoredEmails(1)
+    newsStore.fetchIgnoredEmails(1),
+    fetchLinkedinSettings(),
   ]);
 });
 </script>
@@ -442,6 +532,7 @@ onMounted(async () => {
                 <button class="btn btn-mini" @click.stop="setSingleId(row.id)">Select</button>
                 <button class="btn btn-mini" @click.stop="newsStore.fetchPreview(row.id)">Preview</button>
                 <button class="btn btn-mini" @click.stop="newsStore.updateSingleStatus(row.id, 2)">Set 2</button>
+                <button class="btn btn-mini btn-linkedin" :disabled="newsStore.actionLoading" @click.stop="newsStore.postToLinkedIn(row.id)">LinkedIn</button>
               </td>
             </tr>
           </tbody>
@@ -714,6 +805,97 @@ onMounted(async () => {
           Page suivante
         </button>
       </div>
+    </article>
+
+    <!-- LinkedIn Configuration -->
+    <article class="panel">
+      <h2>Configuration LinkedIn</h2>
+      <p class="muted">Connectez votre compte LinkedIn une seule fois pour activer la publication d'articles.</p>
+
+      <!-- Status badges -->
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px;">
+        <span
+          :style="{
+            display: 'inline-block',
+            padding: '3px 10px',
+            borderRadius: '999px',
+            fontSize: '0.8rem',
+            fontWeight: '600',
+            background: linkedinSettings?.token_configured ? '#dcfce7' : '#fee2e2',
+            color: linkedinSettings?.token_configured ? '#16a34a' : '#dc2626',
+          }"
+        >
+          Token : {{ linkedinSettings?.token_configured ? "Configuré ✓" : "Non configuré" }}
+        </span>
+        <span
+          v-if="linkedinSettings?.token_expires_at"
+          style="display:inline-block;padding:3px 10px;border-radius:999px;font-size:0.8rem;font-weight:600;background:#dbeafe;color:#1d4ed8;"
+        >
+          Expire le {{ linkedinSettings.token_expires_at }}
+        </span>
+        <span
+          :style="{
+            display: 'inline-block',
+            padding: '3px 10px',
+            borderRadius: '999px',
+            fontSize: '0.8rem',
+            fontWeight: '600',
+            background: linkedinSettings?.author_urn ? '#dcfce7' : '#fee2e2',
+            color: linkedinSettings?.author_urn ? '#16a34a' : '#dc2626',
+          }"
+        >
+          URN : {{ linkedinSettings?.author_urn ? (linkedinSettings.author_name || linkedinSettings.author_urn) + " ✓" : "Non configuré" }}
+        </span>
+      </div>
+
+      <!-- Step-by-step flow -->
+      <div style="display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start;">
+
+        <div style="display:flex;flex-direction:column;gap:6px;min-width:160px;">
+          <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 1</span>
+          <button class="btn btn-linkedin" :disabled="linkedinLoading" @click="openLinkedinAuth">
+            Autoriser LinkedIn
+          </button>
+          <span style="font-size:0.72rem;color:#94a3b8;">Ouvre une fenêtre OAuth</span>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:6px;min-width:160px;">
+          <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 2</span>
+          <button class="btn btn-ghost" :disabled="linkedinLoading" @click="checkLinkedinToken">
+            Vérifier le token
+          </button>
+          <span style="font-size:0.72rem;color:#94a3b8;">Après avoir autorisé</span>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:6px;min-width:160px;">
+          <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 3</span>
+          <button
+            class="btn btn-ghost"
+            :disabled="linkedinLoading || !linkedinSettings?.token_configured"
+            @click="fetchLinkedinProfile"
+          >
+            Récupérer mon profil
+          </button>
+          <span style="font-size:0.72rem;color:#94a3b8;">Obtient votre URN LinkedIn</span>
+        </div>
+
+        <div v-if="linkedinProfile" style="display:flex;flex-direction:column;gap:6px;min-width:280px;">
+          <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 4 — Sauvegarder</span>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <code style="font-size:0.82rem;background:#f1f5f9;padding:4px 10px;border-radius:6px;color:#1e293b;">
+              {{ linkedinProfile.author_urn }}
+            </code>
+            <button class="btn btn-primary" :disabled="linkedinLoading" @click="saveLinkedinUrn">
+              Sauvegarder
+            </button>
+          </div>
+          <span style="font-size:0.75rem;color:#64748b;">{{ linkedinProfile.name }}</span>
+        </div>
+
+      </div>
+
+      <p v-if="linkedinMsg" style="color:#16a34a;margin:12px 0 0;font-size:0.88rem;">{{ linkedinMsg }}</p>
+      <p v-if="linkedinErr" style="color:#dc2626;margin:12px 0 0;font-size:0.88rem;">{{ linkedinErr }}</p>
     </article>
 
     <article v-if="message" class="panel panel-success">{{ message }}</article>

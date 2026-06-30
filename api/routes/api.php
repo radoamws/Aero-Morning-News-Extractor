@@ -4,6 +4,7 @@ use App\Http\Controllers\NewsController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CloudflareCacheController;
 use App\Http\Controllers\ProcessLogController;
+use App\Http\Controllers\LinkedInController;
 use App\Http\Controllers\WordPressPostingController;
 use Illuminate\Support\Facades\Route;
 
@@ -11,6 +12,9 @@ Route::post('/auth/login', [AuthController::class, 'login']);
 
 // Cloudflare cache purge — cron-accessible, protected by CLOUDFLARE_PURGE_CRON_SECRET
 Route::post('/cloudflare/purge-homepage-cron', [CloudflareCacheController::class, 'purgeHomepageCron']);
+
+// LinkedIn OAuth callback — appelé par les serveurs LinkedIn (sans token Sanctum)
+Route::get('/linkedin/callback', [LinkedInController::class, 'handleCallback']);
 
 // WordPress synchronization
 Route::middleware('auth:sanctum')->group(function () {
@@ -53,4 +57,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
 	// Cloudflare cache purge (dashboard button)
 	Route::post('/cloudflare/purge-homepage', [CloudflareCacheController::class, 'purgeHomepage']);
+
+	// LinkedIn publishing & configuration
+	Route::post('/news/{id}/post-to-linkedin', [LinkedInController::class, 'postNews']);
+	Route::get('/linkedin/auth', [LinkedInController::class, 'getAuthUrl']);
+	Route::get('/linkedin/auth-info', [LinkedInController::class, 'getAuthInfo']);
+	Route::get('/linkedin/settings', [LinkedInController::class, 'getSettings']);
+	Route::post('/linkedin/save-urn', [LinkedInController::class, 'saveUrn']);
 });

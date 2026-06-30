@@ -525,6 +525,20 @@ export const useNewsStore = defineStore("news", {
         this.actionLoading = false;
       }
     },
+    async postToLinkedIn(id: number) {
+      const { request } = useApi();
+      this.actionLoading = true;
+      try {
+        const result = await request<{ message: string; url: string }>(`/news/${id}/post-to-linkedin`, {
+          method: "POST",
+        });
+        this.setMessage(result.message || `News ${id} publiée sur LinkedIn`);
+      } catch (error: any) {
+        this.setError(error?.data?.message || "Échec publication LinkedIn");
+      } finally {
+        this.actionLoading = false;
+      }
+    },
     async fetchPreview(id: number) {
       const { request } = useApi();
       this.actionLoading = true;
