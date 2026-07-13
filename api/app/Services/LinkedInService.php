@@ -67,7 +67,7 @@ class LinkedInService
             'response_type' => 'code',
             'client_id'     => $this->clientId,
             'redirect_uri'  => $this->redirectUri,
-            'scope'         => 'openid profile w_member_social',
+            'scope'         => 'openid profile w_member_social w_organization_social r_organization_social',
             'state'         => bin2hex(random_bytes(16)),
         ]);
 
@@ -111,23 +111,82 @@ class LinkedInService
             throw new \RuntimeException('Token LinkedIn non configuré. Effectuez d\'abord l\'étape OAuth.');
         }
 
-        $response = Http::withToken($this->accessToken)
+        // Profile de la personne connectée
+        $profileResponse = Http::withToken($this->accessToken)
             ->get('https://api.linkedin.com/v2/userinfo');
 
-        if (!$response->successful()) {
-            throw new \RuntimeException('LinkedIn userinfo failed (HTTP ' . $response->status() . '): ' . $response->body());
+        if (!$profileResponse->successful()) {
+            throw new \RuntimeException('LinkedIn userinfo failed (HTTP ' . $profileResponse->status() . '): ' . $profileResponse->body());
         }
 
-        $info = $response->json();
-        $sub  = $info['sub'] ?? null;
+        $info = $profileResponse->json();
         $name = trim(($info['given_name'] ?? '') . ' ' . ($info['family_name'] ?? ''));
 
+        // Pages administrées par ce compte
+        $organizations = $this->getAdminOrganizations();
+
         return [
-            'name'       => $name,
-            'email'      => $info['email'] ?? null,
-            'sub'        => $sub,
-            'author_urn' => $sub ? "urn:li:person:{$sub}" : null,
+            'name'          => $name,
+            'email'         => $info['email'] ?? null,
+            'sub'           => $info['sub'] ?? null,
+            'organizations' => $organizations,
         ];
+    }
+
+    public function getAdminOrganizations(): array
+    {
+        if (empty($this->accessToken)) {
+            return [];
+        }
+
+        // Récupère les organisations dont l'utilisateur est admin
+        $aclResponse = Http::withToken($this->accessToken)
+            ->withHeaders(['X-Restli-Protocol-Version' => '2.0.0'])
+            ->get('https://api.linkedin.com/v2/organizationAcls', [
+                'q'     => 'roleAssignee',
+                'role'  => 'ADMINISTRATOR',
+                'state' => 'APPROVED',
+            ]);
+
+        if (!$aclResponse->successful()) {
+            Log::warning('LinkedIn: impossible de récupérer les pages administrées', [
+                'status' => $aclResponse->status(),
+                'body'   => $aclResponse->body(),
+            ]);
+            return [];
+        }
+
+        $organizations = [];
+        foreach ($aclResponse->json('elements', []) as $element) {
+            $orgUrn = $element['organization'] ?? null;
+            if (!$orgUrn) {
+                continue;
+            }
+
+            // Extrait l'ID numérique depuis l'URN
+            preg_match('/urn:li:organization:(\d+)/', $orgUrn, $m);
+            $orgId = $m[1] ?? null;
+
+            $orgName = null;
+            if ($orgId) {
+                $orgResponse = Http::withToken($this->accessToken)
+                    ->withHeaders(['X-Restli-Protocol-Version' => '2.0.0'])
+                    ->get("https://api.linkedin.com/v2/organizations/{$orgId}", [
+                        'projection' => '(id,localizedName)',
+                    ]);
+                if ($orgResponse->successful()) {
+                    $orgName = $orgResponse->json('localizedName');
+                }
+            }
+
+            $organizations[] = [
+                'urn'  => $orgUrn,
+                'id'   => $orgId,
+                'name' => $orgName ?? $orgUrn,
+            ];
+        }
+
+        return $organizations;
     }
 
     public function saveAuthorUrn(string $urn, string $name = ''): void

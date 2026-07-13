@@ -179,7 +179,8 @@ const linkedinSettings = ref<{
   author_urn: string | null;
   author_name: string | null;
 } | null>(null);
-const linkedinProfile = ref<{ name: string; sub: string; author_urn: string } | null>(null);
+type LinkedInOrg = { urn: string; id: string; name: string };
+const linkedinOrgs = ref<LinkedInOrg[]>([]);
 const linkedinLoading = ref(false);
 const linkedinMsg = ref("");
 const linkedinErr = ref("");
@@ -223,32 +224,36 @@ const checkLinkedinToken = async () => {
   }
 };
 
-const fetchLinkedinProfile = async () => {
+const fetchLinkedinPages = async () => {
   linkedinLoading.value = true;
   linkedinMsg.value = "";
   linkedinErr.value = "";
   try {
-    const result = await apiRequest<{ name: string; sub: string; author_urn: string }>("/linkedin/auth-info");
-    linkedinProfile.value = result;
-    linkedinMsg.value = `Profil récupéré : ${result.name} (${result.author_urn})`;
+    const result = await apiRequest<{ name: string; organizations: LinkedInOrg[] }>("/linkedin/auth-info");
+    linkedinOrgs.value = result.organizations ?? [];
+    if (linkedinOrgs.value.length === 0) {
+      linkedinErr.value = `Aucune page administrée trouvée pour ${result.name}. Vérifiez que vous êtes bien admin de la page AeroMorning.`;
+    } else {
+      linkedinMsg.value = `${linkedinOrgs.value.length} page(s) trouvée(s). Sélectionnez AeroMorning.`;
+    }
   } catch (e: any) {
-    linkedinErr.value = e?.data?.message || "Erreur lors de la récupération du profil";
+    linkedinErr.value = e?.data?.message || "Erreur lors de la récupération des pages";
   } finally {
     linkedinLoading.value = false;
   }
 };
 
-const saveLinkedinUrn = async () => {
-  if (!linkedinProfile.value?.author_urn) return;
+const selectLinkedinOrg = async (org: LinkedInOrg) => {
   linkedinLoading.value = true;
   linkedinMsg.value = "";
   linkedinErr.value = "";
   try {
     await apiRequest("/linkedin/save-urn", {
       method: "POST",
-      body: { urn: linkedinProfile.value.author_urn, name: linkedinProfile.value.name },
+      body: { urn: org.urn, name: org.name },
     });
-    linkedinMsg.value = "✅ URN sauvegardé ! Vous pouvez maintenant publier des articles via le bouton LinkedIn de la liste.";
+    linkedinMsg.value = `✅ Page "${org.name}" sélectionnée. Les articles seront publiés en tant que ${org.name}.`;
+    linkedinOrgs.value = [];
     await fetchLinkedinSettings();
   } catch (e: any) {
     linkedinErr.value = e?.data?.message || "Erreur lors de la sauvegarde";
@@ -844,7 +849,7 @@ onMounted(async () => {
             color: linkedinSettings?.author_urn ? '#16a34a' : '#dc2626',
           }"
         >
-          URN : {{ linkedinSettings?.author_urn ? (linkedinSettings.author_name || linkedinSettings.author_urn) + " ✓" : "Non configuré" }}
+          Page : {{ linkedinSettings?.author_urn ? (linkedinSettings.author_name || linkedinSettings.author_urn) + " ✓" : "Non configurée" }}
         </span>
       </div>
 
@@ -867,29 +872,32 @@ onMounted(async () => {
           <span style="font-size:0.72rem;color:#94a3b8;">Après avoir autorisé</span>
         </div>
 
-        <div style="display:flex;flex-direction:column;gap:6px;min-width:160px;">
+        <div style="display:flex;flex-direction:column;gap:6px;min-width:180px;">
           <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 3</span>
           <button
             class="btn btn-ghost"
             :disabled="linkedinLoading || !linkedinSettings?.token_configured"
-            @click="fetchLinkedinProfile"
+            @click="fetchLinkedinPages"
           >
-            Récupérer mon profil
+            Récupérer mes pages
           </button>
-          <span style="font-size:0.72rem;color:#94a3b8;">Obtient votre URN LinkedIn</span>
+          <span style="font-size:0.72rem;color:#94a3b8;">Liste vos pages LinkedIn administrées</span>
         </div>
 
-        <div v-if="linkedinProfile" style="display:flex;flex-direction:column;gap:6px;min-width:280px;">
-          <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 4 — Sauvegarder</span>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <code style="font-size:0.82rem;background:#f1f5f9;padding:4px 10px;border-radius:6px;color:#1e293b;">
-              {{ linkedinProfile.author_urn }}
-            </code>
-            <button class="btn btn-primary" :disabled="linkedinLoading" @click="saveLinkedinUrn">
-              Sauvegarder
+        <!-- Step 4 — org list -->
+        <div v-if="linkedinOrgs.length > 0" style="display:flex;flex-direction:column;gap:8px;min-width:260px;">
+          <span style="font-size:0.78rem;font-weight:700;color:#64748b;">ÉTAPE 4 — Sélectionner la page</span>
+          <div
+            v-for="org in linkedinOrgs"
+            :key="org.urn"
+            style="display:flex;align-items:center;gap:10px;background:#f1f5f9;padding:8px 12px;border-radius:8px;"
+          >
+            <span style="flex:1;font-size:0.88rem;font-weight:600;color:#1e293b;">{{ org.name }}</span>
+            <code style="font-size:0.72rem;color:#64748b;">{{ org.urn }}</code>
+            <button class="btn btn-linkedin" :disabled="linkedinLoading" @click="selectLinkedinOrg(org)">
+              Sélectionner
             </button>
           </div>
-          <span style="font-size:0.75rem;color:#64748b;">{{ linkedinProfile.name }}</span>
         </div>
 
       </div>
