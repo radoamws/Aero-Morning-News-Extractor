@@ -31,3 +31,4 @@ yarn-error.log
 /api/*.zip
 /gestion-news/*.zip
 prompt
+/api/.env
