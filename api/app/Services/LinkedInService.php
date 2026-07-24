@@ -216,6 +216,16 @@ class LinkedInService
 
     public function postNews(News $news): array
     {
+        $articleUrl = $this->resolveArticleUrl($news);
+        $postText   = $this->buildPostText($news, $articleUrl);
+
+        // Mode Make.com webhook (prioritaire) — permet de poster en tant que page entreprise
+        $makeWebhookUrl = env('LINKEDIN_MAKE_WEBHOOK_URL', '');
+        if (!empty($makeWebhookUrl)) {
+            return $this->postViaMake($makeWebhookUrl, $news, $postText, $articleUrl);
+        }
+
+        // Mode API LinkedIn directe (nécessite w_organization_social pour une page)
         if (empty($this->accessToken)) {
             throw new \RuntimeException('Token LinkedIn non configuré. Utilisez le panel "Configuration LinkedIn" du dashboard.');
         }
@@ -223,9 +233,40 @@ class LinkedInService
             throw new \RuntimeException('URN LinkedIn non configuré. Utilisez le panel "Configuration LinkedIn" du dashboard.');
         }
 
-        $articleUrl = $this->resolveArticleUrl($news);
-        $postText   = $this->buildPostText($news, $articleUrl);
+        return $this->postViaLinkedInApi($postText, $articleUrl, $news);
+    }
 
+    private function postViaMake(string $webhookUrl, News $news, string $postText, string $articleUrl): array
+    {
+        $payload = [
+            'text'     => $postText,
+            'url'      => $articleUrl,
+            'title'    => $news->title,
+            'excerpt'  => $this->buildExcerpt($news, 200),
+            'hashtags' => $this->buildHashtags($news),
+        ];
+
+        $response = Http::timeout(30)->post($webhookUrl, $payload);
+
+        Log::info('LinkedIn via Make webhook', [
+            'news_id' => $news->id,
+            'status'  => $response->status(),
+            'body'    => $response->body(),
+        ]);
+
+        if (!$response->successful()) {
+            throw new \RuntimeException("Make webhook error (HTTP {$response->status()}): " . $response->body());
+        }
+
+        return [
+            'success' => true,
+            'post_id' => 'via-make',
+            'url'     => 'https://www.linkedin.com/company/4869929/admin/page-posts/published/',
+        ];
+    }
+
+    private function postViaLinkedInApi(string $postText, string $articleUrl, News $news): array
+    {
         $payload = [
             'author'          => $this->authorUrn,
             'lifecycleState'  => 'PUBLISHED',
@@ -252,7 +293,7 @@ class LinkedInService
             ->withHeaders(['X-Restli-Protocol-Version' => '2.0.0'])
             ->post('https://api.linkedin.com/v2/ugcPosts', $payload);
 
-        Log::info('LinkedIn UGC post', [
+        Log::info('LinkedIn UGC post (direct API)', [
             'news_id' => $news->id,
             'status'  => $response->status(),
             'body'    => $response->body(),
