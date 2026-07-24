@@ -927,6 +927,9 @@ class NewsController extends Controller
             $tagsString = $this->openaiService->classifyTags($content, $tags, $lang);
             $tagsString = $this->reorderSelectedTags($tagsString, $tags, $categories, $categoriesString, $content, $title);
 
+            // Détecte si le mail source mentionne "linkedin" (insensible à la casse)
+            $mentionsLinkedin = stripos(trim($contentBrut), 'linkedin') !== false;
+
             News::create([
                 'lang' => $lang,
                 'title' => $title,
@@ -939,6 +942,8 @@ class NewsController extends Controller
                 'image_url' => $imageUrl,
                 'status' => News::STATUS_PENDING,
                 'email_message_id' => $messageId,
+                'linkedin' => $mentionsLinkedin,
+                'linkedin_posted' => false,
             ]);
 
             Log::info("{$lang} news created successfully for email: {$messageId}");

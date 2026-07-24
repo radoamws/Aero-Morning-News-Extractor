@@ -141,6 +141,21 @@ class WordPressPostingService
             Log::info("News #{$news->id} published to WordPress — WP post ID: {$wpPostId}");
             $this->persistWordPressPostMapping($news, $wpPostId);
 
+            // Auto-post to LinkedIn if the source email mentioned "linkedin"
+            if ($news->linkedin && !$news->linkedin_posted) {
+                try {
+                    /** @var \App\Services\LinkedInService $linkedIn */
+                    $linkedIn = app(\App\Services\LinkedInService::class);
+                    $linkedIn->postNews($news);
+                    $news->linkedin_posted = true;
+                    $news->save();
+                    Log::info("News #{$news->id} auto-posted to LinkedIn via Make webhook");
+                } catch (\Throwable $e) {
+                    // LinkedIn failure must never block WordPress publish
+                    Log::warning("News #{$news->id} LinkedIn auto-post failed: " . $e->getMessage());
+                }
+            }
+
             // Step 3 — update Yoast SEO meta + rebuild indexable
             // Pass requestReindex=true so the mu-plugin calls build_for_id_and_type()
             // after writing the meta (including the computed _yoast_wpseo_linkdex).

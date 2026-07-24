@@ -19,14 +19,18 @@ class News extends Model
         'image_url',
         'wp_post_id',
         'status',
-        'email_message_id'
+        'email_message_id',
+        'linkedin',
+        'linkedin_posted',
     ];
 
     protected $casts = [
-        'wp_post_id' => 'integer',
-        'status' => 'integer',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime'
+        'wp_post_id'      => 'integer',
+        'status'          => 'integer',
+        'linkedin'        => 'boolean',
+        'linkedin_posted' => 'boolean',
+        'created_at'      => 'datetime',
+        'updated_at'      => 'datetime',
     ];
 
     public const STATUS_PENDING = 0;
