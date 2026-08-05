@@ -18,8 +18,9 @@ yarn-error.log
 /.idea
 /.vscode
 /gestion-news/node_modules
-/api/vendor
 /gestion-news/.nuxt
+/api/vendor
+/gestion-news/*.nuxt
 /gestion-news/dist
 /gestion-news/.output
 /gestion-news/.env
