@@ -337,29 +337,16 @@ class LinkedInService
     {
         $articleUrl = $this->resolveArticleUrl($news);
 
-        // 1. Buffer.com (prioritaire) — @mentions cliquables via annotations LinkedIn
-        //    Buffer est un partenaire LinkedIn approuvé → pas besoin de Community Management API
+        // Buffer = provider unique pour les publications AeroMorning.
+        // Les anciens fallbacks (Make.com, API LinkedIn directe) sont désactivés :
+        // ils masquaient les erreurs Buffer et rendaient le diagnostic impossible.
         if (!empty(env('BUFFER_API_KEY', '')) && !empty(env('BUFFER_LINKEDIN_CHANNEL_ID', ''))) {
             return $this->postViaBuffer($articleUrl, $news);
         }
 
-        $postText = $this->buildPostText($news, $articleUrl);
-
-        // 2. Make.com webhook — @Nom en texte brut (non cliquable)
-        $makeWebhookUrl = env('LINKEDIN_MAKE_WEBHOOK_URL', '');
-        if (!empty($makeWebhookUrl)) {
-            return $this->postViaMake($makeWebhookUrl, $news, $postText, $articleUrl);
-        }
-
-        // 3. API LinkedIn directe (peut nécessiter w_organization_social approuvé)
-        if (empty($this->accessToken)) {
-            throw new \RuntimeException('Token LinkedIn non configuré. Utilisez le panel "Configuration LinkedIn" du dashboard.');
-        }
-        if (empty($this->authorUrn)) {
-            throw new \RuntimeException('URN LinkedIn non configuré. Utilisez le panel "Configuration LinkedIn" du dashboard.');
-        }
-
-        return $this->postViaLinkedInApi($postText, $articleUrl, $news);
+        throw new \RuntimeException(
+            'Buffer non configuré. Renseignez BUFFER_API_KEY et BUFFER_LINKEDIN_CHANNEL_ID dans .env.'
+        );
     }
 
     private function postViaMake(string $webhookUrl, News $news, string $postText, string $articleUrl): array
@@ -607,11 +594,13 @@ class LinkedInService
 mutation CreatePost($input: CreatePostInput!) {
     createPost(input: $input) {
         ... on PostActionSuccess {
-            post { id text }
+            post { id text status }
         }
-        ... on MutationError {
-            message
-        }
+        ... on MutationError      { message }
+        ... on InvalidInputError  { message }
+        ... on UnauthorizedError  { message }
+        ... on LimitReachedError  { message }
+        ... on UnexpectedError    { message }
     }
 }
 GQL;
@@ -684,8 +673,12 @@ GQL;
 
     /**
      * Construit le texte du post pour Buffer/LinkedIn.
-     * Structure : ✈️ Titre \n\n Excerpt \n\n 🔗 URL \n\n @Entreprises \n\n #hashtags
-     * Utilise les noms officiels LinkedIn pour les @mentions (requis par l'API).
+     * Structure : ✈️ Titre \n\n Excerpt \n\n @Entreprises \n\n #hashtags
+     *
+     * L'URL de l'article n'est PAS incluse dans le texte : elle est transmise
+     * séparément via metadata.linkedin.linkAttachment.url, ce qui permet à
+     * Buffer/LinkedIn de générer automatiquement la carte de prévisualisation
+     * (og:title, og:description, og:image) sans dupliquer l'URL dans le texte.
      */
     private function buildBufferPostText(News $news, string $articleUrl, array $companies): string
     {
@@ -693,12 +686,12 @@ GQL;
         $hashtags = $this->buildHashtags($news);
         $title    = $news->title ?? '';
 
-        $text = "✈️ {$title}\n\n{$excerpt}\n\n🔗 {$articleUrl}";
+        // L'URL est dans linkAttachment → pas dans le texte
+        $text = "✈️ {$title}\n\n{$excerpt}";
 
         if (!empty($companies)) {
             $parts = [];
             foreach ($companies as $c) {
-                // Utiliser le nom officiel LinkedIn (pas celui d'OpenAI) pour les @mentions
                 $parts[] = '@' . $this->officialName($c['slug'], $c['name']);
             }
             $text .= "\n\n" . implode(' ', $parts);
@@ -711,8 +704,20 @@ GQL;
 
     /**
      * Construit le tableau d'annotations Buffer (LinkedIn @mentions cliquables).
-     * Chaque annotation associe la position UTF-16 de "@Nom" dans le texte à l'URN LinkedIn.
-     * Buffer transmet ces annotations à LinkedIn qui les transforme en mentions cliquables.
+     *
+     * Contrat Buffer AnnotationInputLinkedIn (documenté officiellement) :
+     *
+     *   localizedName = "Airbus"
+     *   start          = position UTF-16 du "A"  ← premier char du NOM, PAS du "@"
+     *   length         = longueur UTF-16 de "Airbus"  ← PAS de "@Airbus"
+     *
+     * Exemple officiel Buffer :
+     *   text: "Check out Buffer's platform @Buffer"
+     *   → localizedName: "Buffer", start: 29, length: 6
+     *   → text[29 : 29+6] == "Buffer"  ✓
+     *
+     * Ce que LinkedIn valide :  text[start : start+length] == localizedName
+     * (le "@" est immédiatement avant start mais n'est PAS dans l'annotation)
      */
     private function buildBufferAnnotations(string $text, array $companies): array
     {
@@ -726,61 +731,97 @@ GQL;
         ]);
 
         $annotations = [];
-        $searchFrom  = 0; // index Unicode pour éviter de trouver le même @ deux fois
+        $searchFrom  = 0; // position Unicode courante pour éviter de trouver deux fois la même mention
 
         foreach ($companies as $company) {
-            $slug         = $company['slug'];
-            // ⚠️  CRITIQUE : utiliser le NOM OFFICIEL LinkedIn (même que dans buildBufferPostText)
-            // LinkedIn valide : text[start:length] == "@" + localizedName
-            // Un nom différent (p.ex "Archer Aviation" vs "Archer") provoque :
-            // "Invalid LinkedIn organization mention: text at position does not match."
-            $officialName = $this->officialName($slug, $company['name']);
+            $slug         = trim((string) ($company['slug'] ?? ''));
+            if ($slug === '') continue;
 
+            // Nom officiel LinkedIn — DOIT correspondre exactement au texte du post
+            $officialName = $this->officialName($slug, $company['name']);
+            if ($officialName === '') continue;
+
+            // URN → null si inconnu (annotation impossible → mention reste en texte brut)
             $urn = $this->resolveCompanyUrn($slug);
             if (!$urn) {
-                Log::warning("LinkedIn annotations: pas d'URN pour '{$officialName}' (slug: '{$slug}') → mention texte brut uniquement");
+                Log::warning("LinkedIn annotations: pas d'URN pour '{$officialName}' (slug: '{$slug}') → texte brut");
                 continue;
             }
 
-            // Chercher "@NomOfficiel" dans le texte (qui a été construit avec les mêmes noms officiels)
+            // Valider le format URN et extraire l'ID numérique
+            if (!preg_match('/^urn:li:organization:(\d+)$/', $urn, $m)) {
+                Log::warning("LinkedIn annotations: URN invalide '{$urn}' pour '{$slug}'");
+                continue;
+            }
+            $orgId = $m[1];
+
+            // Localiser "@NomOfficiel" dans le texte
             $mention    = '@' . $officialName;
             $unicodePos = mb_strpos($text, $mention, $searchFrom);
             if ($unicodePos === false) {
-                Log::warning("LinkedIn annotations: '{$mention}' introuvable dans le texte du post (searchFrom={$searchFrom})");
+                Log::warning("LinkedIn annotations: '{$mention}' introuvable dans le texte (searchFrom={$searchFrom})");
                 continue;
             }
 
-            // Extraire l'ID numérique de l'URN (urn:li:organization:3019636 → "3019636")
-            preg_match('/urn:li:organization:(\d+)/', $urn, $m);
-            $orgId  = $m[1] ?? '';
-            $start  = $this->utf16PositionOf($text, $unicodePos);
-            $length = $this->utf16Len($mention);
+            // ── Calcul start / length ─────────────────────────────────────────────
+            // start  = position UTF-16 du PREMIER CARACTÈRE du NOM (le char après "@")
+            // length = nombre de code units UTF-16 du NOM SEUL (sans "@")
+            //
+            // ❌ ANCIENNE VERSION (fausse) :
+            //   start = utf16PositionOf(text, unicodePos)     ← pointait sur "@"
+            //   length = utf16Len("@Airbus")                  ← incluait le "@"
+            //
+            // ✅ VERSION CORRECTE :
+            //   start = utf16PositionOf(text, unicodePos + 1) ← pointe sur "A"
+            //   length = utf16Len("Airbus")                   ← NOM SEUL
+            $nameUnicodePos = $unicodePos + 1; // sauter le "@"
+            $start          = $this->utf16PositionOf($text, $nameUnicodePos);
+            $length         = $this->utf16Len($officialName);
 
-            Log::info("LinkedIn annotations: ✅ '{$mention}' → URN {$urn}", [
-                'utf16_start'       => $start,
-                'utf16_length'      => $length,
-                'org_id'            => $orgId,
-                'official_name'     => $officialName,
-            ]);
+            // Validation locale : vérifier que text[start:length] == localizedName
+            // avant d'envoyer à Buffer (évite les erreurs "text at position does not match")
+            $extracted = $this->utf16Substring($text, $start, $length);
+            if ($extracted !== $officialName) {
+                Log::error('LinkedIn annotation: validation locale échouée', [
+                    'slug'      => $slug,
+                    'expected'  => $officialName,
+                    'extracted' => $extracted,
+                    'start'     => $start,
+                    'length'    => $length,
+                ]);
+                continue;
+            }
+
+            // URL de la page LinkedIn (utiliser celle stockée si disponible)
+            $link = !empty($company['url'])
+                ? $company['url']
+                : "https://www.linkedin.com/company/{$slug}/";
 
             $annotations[] = [
                 'id'            => $orgId,
                 'entity'        => $urn,
                 'length'        => $length,
-                'link'          => "https://www.linkedin.com/company/{$slug}/",
-                'localizedName' => $officialName,  // NOM OFFICIEL LinkedIn, pas celui d'OpenAI
+                'link'          => $link,
+                'localizedName' => $officialName,
                 'start'         => $start,
                 'vanityName'    => $slug,
             ];
 
-            $searchFrom = $unicodePos + 1;
+            Log::info("LinkedIn annotations: ✅ '{$mention}' → URN {$urn}", [
+                'utf16_start'  => $start,
+                'utf16_length' => $length,
+                'org_id'       => $orgId,
+                'validated'    => $extracted,
+            ]);
+
+            // Avancer searchFrom après la mention complète (pas juste +1)
+            $searchFrom = $unicodePos + mb_strlen($mention);
         }
 
         Log::info('LinkedIn annotations: résolution terminée', [
             'total_companies'   => count($companies),
             'annotations_built' => count($annotations),
             'slugs_resolved'    => array_column($annotations, 'vanityName'),
-            'names_used'        => array_column($annotations, 'localizedName'),
         ]);
 
         return $annotations;
@@ -788,9 +829,9 @@ GQL;
 
     /**
      * Convertit un index de caractère Unicode (résultat de mb_strpos) en nombre
-     * de code units UTF-16. Buffer/LinkedIn indexent les annotations en UTF-16 :
-     * - Caractères BMP  (U+0000–U+FFFF) : 1 code unit  (ASCII, ✈️ U+2708…)
-     * - Caractères supp (U+10000+)       : 2 code units (🔗 U+1F517, 😀…)
+     * de code units UTF-16 depuis le début de la chaîne.
+     * - Caractères BMP  (U+0000–U+FFFF) : 1 code unit (ASCII, accents, ✈️ U+2708…)
+     * - Caractères supp (U+10000+)       : 2 code units (🔗 U+1F517, emoji couleurs…)
      */
     private function utf16PositionOf(string $text, int $unicodeCharIndex): int
     {
@@ -800,6 +841,37 @@ GQL;
             $units += ($cp >= 0x10000) ? 2 : 1;
         }
         return $units;
+    }
+
+    /**
+     * Extrait la sous-chaîne Unicode correspondant à [start, start+length[ en UTF-16.
+     * Utilisé pour valider localement que text[start:length] == localizedName
+     * avant d'envoyer l'annotation à Buffer.
+     */
+    private function utf16Substring(string $text, int $start, int $length): string
+    {
+        $result    = '';
+        $units     = 0;
+        $charCount = mb_strlen($text);
+
+        for ($i = 0; $i < $charCount; $i++) {
+            $char      = mb_substr($text, $i, 1);
+            $cp        = mb_ord($char);
+            $charUnits = ($cp >= 0x10000) ? 2 : 1;
+            $charEnd   = $units + $charUnits;
+
+            if ($units >= $start && $charEnd <= ($start + $length)) {
+                $result .= $char;
+            }
+
+            $units = $charEnd;
+
+            if ($units >= $start + $length) {
+                break;
+            }
+        }
+
+        return $result;
     }
 
     // -------------------------------------------------------------------------
