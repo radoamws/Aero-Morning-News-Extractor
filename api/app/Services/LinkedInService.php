@@ -8,6 +8,119 @@ use Illuminate\Support\Facades\Log;
 
 class LinkedInService
 {
+    /**
+     * Carte statique slug LinkedIn → URN LinkedIn.
+     * Vérifiée par scraping direct (tests août 2026).
+     * Ces URNs sont permanents — ils ne changent jamais.
+     * Utilisée en priorité sur l'API et le scraping en temps réel.
+     */
+    /**
+     * Noms officiels LinkedIn par slug (vérifiés par scraping août 2026).
+     * Ces noms DOIVENT correspondre exactement au nom affiché sur la page LinkedIn.
+     * Utilisés dans le texte du post ET dans localizedName des annotations Buffer.
+     * LinkedIn valide que text[start:length] == "@" + localizedName → toute divergence
+     * provoque l'erreur "Invalid LinkedIn organization mention: text at position does not match."
+     */
+    private const KNOWN_NAMES = [
+        // ── eVTOL / AAM ───────────────────────────────────────────────────────
+        'flyarcher'                     => 'Archer',             // Archer Aviation (nom LI: "Archer")
+        'jobyaviation'                  => 'Joby Aviation',
+        'wisk-aero'                     => 'Wisk',               // NOM OFFICIEL: "Wisk" (pas "Wisk Aero")
+        'volocopter'                    => 'Volocopter',
+        'insitu'                        => 'INsitu',             // CASSE OFFICIELLE: "INsitu"
+        'skygrid'                       => 'SkyGrid',
+        // ── Constructeurs / OEM ───────────────────────────────────────────────
+        'boeing'                        => 'Boeing',
+        'airbusgroup'                   => 'Airbus',             // NOM OFFICIEL: "Airbus" (pas "Airbus Group")
+        'safran'                        => 'Safran',
+        'thales'                        => 'Thales',
+        'rolls-royce'                   => 'Rolls-Royce',
+        'honeywell'                     => 'Honeywell',
+        'collins-aerospace'             => 'Collins Aerospace',
+        'prattwhitney'                  => 'Pratt & Whitney',
+        'dassault-aviation'             => 'Dassault Aviation',
+        'mtu-aero-engines'              => 'MTU Aero Engines',
+        'textron'                       => 'Textron',
+        'bell'                          => 'Bell',
+        'leonardo'                      => 'Leonardo',
+        'mbda'                          => 'MBDA',
+        'rheinmetall'                   => 'Rheinmetall',
+        'hensoldt'                      => 'HENSOLDT',           // CASSE OFFICIELLE: tout en majuscules
+        // ── Défense ────────────────────────────────────────────────────────────
+        'lockheed-martin'               => 'Lockheed Martin',
+        'northrop-grumman-corporation'  => 'Northrop Grumman',
+        'rtx'                           => 'RTX',
+        'bae-systems'                   => 'BAE Systems',
+        'general-dynamics'              => 'General Dynamics',
+        'l3harris-technologies'         => 'L3Harris Technologies', // "Technologies" inclus
+        // ── Airlines ───────────────────────────────────────────────────────────
+        'korean-air'                    => 'Korean Air',
+        'air-france'                    => 'Air France',
+        'lufthansa-group'               => 'Lufthansa Group',
+        'united-airlines'               => 'United Airlines',
+        'delta-air-lines'               => 'Delta Air Lines',
+        'american-airlines'             => 'American Airlines',
+        'emirates'                      => 'Emirates',
+        'cathay-pacific'                => 'Cathay Pacific',
+        // ── Espace ─────────────────────────────────────────────────────────────
+        'spacex'                        => 'SpaceX',
+        'arianegroup'                   => 'ArianeGroup',
+        // ── Agences / institutions ─────────────────────────────────────────────
+        'easa'                          => 'EASA',
+        'nato'                          => 'NATO',
+    ];
+
+    private const KNOWN_URNS = [
+        // ── eVTOL / AAM ───────────────────────────────────────────────────────
+        'flyarcher'                 => 'urn:li:organization:42881474', // Archer Aviation (slug: flyarcher)
+        'jobyaviation'              => 'urn:li:organization:6407329',
+        'wisk-aero'                 => 'urn:li:organization:31425081',
+        'volocopter'                => 'urn:li:organization:2914824',
+        'insitu'                    => 'urn:li:organization:1151664',
+        'skygrid'                   => 'urn:li:organization:2333563',
+        // ── Constructeurs / OEM ───────────────────────────────────────────────
+        'boeing'                    => 'urn:li:organization:1384',
+        'airbusgroup'               => 'urn:li:organization:2734',
+        'airbus'                    => 'urn:li:organization:3211',
+        'safran'                    => 'urn:li:organization:521777',
+        'thales'                    => 'urn:li:organization:1951',
+        'rolls-royce'               => 'urn:li:organization:3871',
+        'honeywell'                 => 'urn:li:organization:1344',
+        'collins-aerospace'         => 'urn:li:organization:11695727',
+        'prattwhitney'              => 'urn:li:organization:71747137',
+        'dassault-aviation'         => 'urn:li:organization:8693',
+        'mtu-aero-engines'          => 'urn:li:organization:14146',
+        'textron'                   => 'urn:li:organization:3335',
+        'bell'                      => 'urn:li:organization:1531',
+        'leonardo'                  => 'urn:li:organization:36193',
+        'mbda'                      => 'urn:li:organization:164883',
+        'rheinmetall'               => 'urn:li:organization:1568176',
+        'hensoldt'                  => 'urn:li:organization:17896121',
+        // ── Défense ────────────────────────────────────────────────────────────
+        'lockheed-martin'           => 'urn:li:organization:1319',
+        'northrop-grumman-corporation' => 'urn:li:organization:1412',
+        'rtx'                       => 'urn:li:organization:40653509',
+        'bae-systems'               => 'urn:li:organization:1882',
+        'general-dynamics'          => 'urn:li:organization:1904',
+        'l3harris-technologies'     => 'urn:li:organization:40745219',
+        // ── Airlines ───────────────────────────────────────────────────────────
+        'korean-air'                => 'urn:li:organization:20798',
+        'air-france'                => 'urn:li:organization:4242',
+        'lufthansa-group'           => 'urn:li:organization:11295773',
+        'lufthansa'                 => 'urn:li:organization:4231',
+        'united-airlines'           => 'urn:li:organization:2380',
+        'delta-air-lines'           => 'urn:li:organization:2272',
+        'american-airlines'         => 'urn:li:organization:2640',
+        'emirates'                  => 'urn:li:organization:5042',
+        'cathay-pacific'            => 'urn:li:organization:7097',
+        // ── Espace ─────────────────────────────────────────────────────────────
+        'spacex'                    => 'urn:li:organization:30846',
+        'arianegroup'               => 'urn:li:organization:10236541',
+        // ── Agences / institutions ─────────────────────────────────────────────
+        'easa'                      => 'urn:li:organization:213394',
+        'nato'                      => 'urn:li:organization:5636',
+    ];
+
     private string $clientId;
     private string $clientSecret;
     private string $redirectUri;
@@ -451,6 +564,12 @@ class LinkedInService
         $channelId = env('BUFFER_LINKEDIN_CHANNEL_ID', '');
 
         $companies   = $this->detectCompanies($news);
+        Log::info('Buffer: companies détectées pour le post', [
+            'news_id'   => $news->id,
+            'news_title'=> $news->title,
+            'companies' => array_map(fn($c) => $c['name'] . ' → ' . $c['slug'], $companies),
+        ]);
+
         $postText    = $this->buildBufferPostText($news, $articleUrl, $companies);
         $annotations = $this->buildBufferAnnotations($postText, $companies);
 
@@ -537,8 +656,30 @@ GQL;
     }
 
     /**
+     * Retourne le nom officiel LinkedIn d'un slug.
+     * Priorité : KNOWN_NAMES → cache linkedin.json (company_names) → nom OpenAI
+     * Ce nom est utilisé dans le texte ET dans localizedName pour que LinkedIn valide.
+     */
+    private function officialName(string $slug, string $fallbackName): string
+    {
+        // 1. Carte statique vérifiée
+        if (isset(self::KNOWN_NAMES[$slug])) {
+            return self::KNOWN_NAMES[$slug];
+        }
+        // 2. Cache persistant (nom scrapé lors d'une résolution d'URN précédente)
+        $settings = self::readSettings();
+        $names    = $settings['company_names'] ?? [];
+        if (!empty($names[$slug])) {
+            return $names[$slug];
+        }
+        // 3. Nom retourné par OpenAI (dernier recours — peut différer du nom LinkedIn)
+        return $fallbackName;
+    }
+
+    /**
      * Construit le texte du post pour Buffer/LinkedIn.
      * Structure : ✈️ Titre \n\n Excerpt \n\n 🔗 URL \n\n @Entreprises \n\n #hashtags
+     * Utilise les noms officiels LinkedIn pour les @mentions (requis par l'API).
      */
     private function buildBufferPostText(News $news, string $articleUrl, array $companies): string
     {
@@ -549,8 +690,12 @@ GQL;
         $text = "✈️ {$title}\n\n{$excerpt}\n\n🔗 {$articleUrl}";
 
         if (!empty($companies)) {
-            $mentions = implode(' ', array_map(fn($c) => '@' . $c['name'], $companies));
-            $text .= "\n\n{$mentions}";
+            $parts = [];
+            foreach ($companies as $c) {
+                // Utiliser le nom officiel LinkedIn (pas celui d'OpenAI) pour les @mentions
+                $parts[] = '@' . $this->officialName($c['slug'], $c['name']);
+            }
+            $text .= "\n\n" . implode(' ', $parts);
         }
 
         $text .= "\n\n{$hashtags}";
@@ -566,41 +711,71 @@ GQL;
     private function buildBufferAnnotations(string $text, array $companies): array
     {
         if (empty($companies)) {
+            Log::debug('LinkedIn annotations: aucune company détectée → pas d\'annotations');
             return [];
         }
+
+        Log::info('LinkedIn annotations: début de résolution', [
+            'companies' => array_map(fn($c) => $c['name'] . ' (slug: ' . $c['slug'] . ')', $companies),
+        ]);
 
         $annotations = [];
         $searchFrom  = 0; // index Unicode pour éviter de trouver le même @ deux fois
 
         foreach ($companies as $company) {
-            $urn = $this->resolveCompanyUrn($company['slug']);
+            $slug         = $company['slug'];
+            // ⚠️  CRITIQUE : utiliser le NOM OFFICIEL LinkedIn (même que dans buildBufferPostText)
+            // LinkedIn valide : text[start:length] == "@" + localizedName
+            // Un nom différent (p.ex "Archer Aviation" vs "Archer") provoque :
+            // "Invalid LinkedIn organization mention: text at position does not match."
+            $officialName = $this->officialName($slug, $company['name']);
+
+            $urn = $this->resolveCompanyUrn($slug);
             if (!$urn) {
-                // Pas d'URN LinkedIn → mention en texte brut uniquement, pas d'annotation
+                Log::warning("LinkedIn annotations: pas d'URN pour '{$officialName}' (slug: '{$slug}') → mention texte brut uniquement");
                 continue;
             }
 
-            $mention    = '@' . $company['name'];
+            // Chercher "@NomOfficiel" dans le texte (qui a été construit avec les mêmes noms officiels)
+            $mention    = '@' . $officialName;
             $unicodePos = mb_strpos($text, $mention, $searchFrom);
             if ($unicodePos === false) {
+                Log::warning("LinkedIn annotations: '{$mention}' introuvable dans le texte du post (searchFrom={$searchFrom})");
                 continue;
             }
 
             // Extraire l'ID numérique de l'URN (urn:li:organization:3019636 → "3019636")
             preg_match('/urn:li:organization:(\d+)/', $urn, $m);
-            $orgId = $m[1] ?? '';
+            $orgId  = $m[1] ?? '';
+            $start  = $this->utf16PositionOf($text, $unicodePos);
+            $length = $this->utf16Len($mention);
+
+            Log::info("LinkedIn annotations: ✅ '{$mention}' → URN {$urn}", [
+                'utf16_start'       => $start,
+                'utf16_length'      => $length,
+                'org_id'            => $orgId,
+                'official_name'     => $officialName,
+            ]);
 
             $annotations[] = [
                 'id'            => $orgId,
                 'entity'        => $urn,
-                'length'        => $this->utf16Len($mention),
-                'link'          => "https://www.linkedin.com/company/{$company['slug']}/",
-                'localizedName' => $company['name'],
-                'start'         => $this->utf16PositionOf($text, $unicodePos),
-                'vanityName'    => $company['slug'],
+                'length'        => $length,
+                'link'          => "https://www.linkedin.com/company/{$slug}/",
+                'localizedName' => $officialName,  // NOM OFFICIEL LinkedIn, pas celui d'OpenAI
+                'start'         => $start,
+                'vanityName'    => $slug,
             ];
 
             $searchFrom = $unicodePos + 1;
         }
+
+        Log::info('LinkedIn annotations: résolution terminée', [
+            'total_companies'   => count($companies),
+            'annotations_built' => count($annotations),
+            'slugs_resolved'    => array_column($annotations, 'vanityName'),
+            'names_used'        => array_column($annotations, 'localizedName'),
+        ]);
 
         return $annotations;
     }
@@ -742,48 +917,73 @@ GQL;
 
         // ── Prompt ────────────────────────────────────────────────────────────
         $prompt = <<<PROMPT
-You are an aerospace, aviation, defense, eVTOL, UAM, and space industry expert.
+You are an aerospace, aviation, defense, eVTOL, UAM, AAM, and space industry expert.
+Your task: extract the most important companies from the article to @mention on LinkedIn.
 
-Identify ALL companies, organizations, agencies, and institutions mentioned in the article below.
-Include: airlines, manufacturers, defense contractors, eVTOL/UAM/AAM startups, government agencies,
-military branches, regulatory bodies, research institutes, and international organizations.
+PRIORITY RULES (apply in order):
+1. Prefer the ACQUIRER over the acquired subsidiary (e.g. Archer > SkyGrid when Archer buys SkyGrid)
+2. Prefer publicly traded or large established companies (Airbus, Boeing, Thales…)
+3. Prefer the OPERATOR/AIRLINE over the aircraft manufacturer when both mentioned
+4. Include regulatory bodies (FAA, EASA…) only if they are the central topic
+5. Omit pure subsidiaries with no independent LinkedIn following
+6. Maximum 6 companies — quality over quantity
 
-Known LinkedIn slugs (use these when the entity is mentioned):
-- Archer / Archer Aviation → archerair
+KNOWN LINKEDIN SLUGS — use these EXACT values (verified August 2026):
+eVTOL / AAM / Drones:
+- Archer / Archer Aviation → flyarcher
 - Joby / Joby Aviation → jobyaviation
-- Wisk / Wisk Aero → wiskaero
+- Wisk / Wisk Aero → wisk-aero
 - Volocopter → volocopter
-- Lilium → lilium-jet
-- Korean Air → koreanair
-- Advanced Air Mobility International / AAM International → advanced-air-mobility-international
+- SkyGrid → skygrid
+- Insitu → insitu
+
+Airlines & Operators:
+- Korean Air → korean-air
+- Air France → air-france
+- Lufthansa Group → lufthansa-group
+- United Airlines → united-airlines
+- Delta Air Lines → delta-air-lines
+- American Airlines → american-airlines
+- Emirates → emirates
+- Cathay Pacific → cathay-pacific
+
+Manufacturers & OEMs:
 - Airbus → airbusgroup
-- Boeing → the-boeing-company
-- Safran → safrangroup
+- Boeing → boeing
+- Safran → safran
 - Thales → thales
 - Dassault Aviation → dassault-aviation
 - Rolls-Royce → rolls-royce
-- GE Aerospace / General Electric → ge-aerospace
-- Pratt & Whitney → pratt-whitney
-- European Defence Agency / EDA → european-defence-agency
-- NATO → nato
-- NSPA → nspa-nato-support-and-procurement-agency
-- European Commission → european-commission
-- EASA → easa
-- FAA → federal-aviation-administration
+- Pratt & Whitney → prattwhitney
+- Honeywell → honeywell
+- Collins Aerospace → collins-aerospace
+- Leonardo → leonardo
+- MBDA → mbda
+- Rheinmetall → rheinmetall
+- Textron → textron
+- Bell / Bell Helicopter → bell
+- MTU Aero Engines → mtu-aero-engines
+
+Defense:
 - Lockheed Martin → lockheed-martin
-- Northrop Grumman → northropgrumman
+- Northrop Grumman → northrop-grumman-corporation
 - RTX / Raytheon → rtx
 - BAE Systems → bae-systems
+- General Dynamics → general-dynamics
+- L3Harris → l3harris-technologies
+
+Space:
 - SpaceX → spacex
+- ArianeGroup → arianegroup
+
+Agencies & institutions:
+- NATO → nato
+- EASA → easa
 
 Rules:
-- Include BOTH the aircraft/eVTOL maker AND the airline/operator when both are mentioned
-- "AAM" in eVTOL/urban aviation context often refers to "Advanced Air Mobility International"
-- Only include entities with a confirmed LinkedIn presence
-- Use the exact slug you know — omit if unsure
-- Do NOT include AeroMorning (that is us, not a mention)
-- Maximum 8 entities
-- Return ONLY a JSON object
+- Use ONLY slugs from the list above — if you are unsure of the slug, OMIT the company
+- Do NOT include AeroMorning (that is our own publication)
+- Return ONLY a JSON object, no markdown
 
 Format: {"companies": [{"name": "Official LinkedIn Display Name", "slug": "linkedin-vanity-slug"}]}
 
@@ -844,16 +1044,30 @@ PROMPT;
     }
 
     /**
-     * Vérifie qu'une page LinkedIn company/{slug}/ existe et est accessible.
-     * Retourne false uniquement si LinkedIn confirme une 404 (slug invalide).
-     * Toute autre réponse (200, 999, redirect…) est considérée comme valide.
+     * Vérifie qu'un slug LinkedIn company correspond à une vraie page.
+     * - Slugs dans KNOWN_URNS → toujours valides (aucun appel réseau)
+     * - Cache linkedin.json → '' = 404 déjà confirmé → invalide
+     * - Sinon : HTTP GET sur la page LinkedIn
+     *   - 404 → invalide
+     *   - Tout le reste (200, 429, 999…) → valide (LinkedIn bloque souvent les bots)
      */
     private function verifyLinkedInSlug(string $slug): bool
     {
+        // Slug dans la carte statique → immédiatement valide
+        if (isset(self::KNOWN_URNS[$slug])) {
+            return true;
+        }
+
+        // Cache : '' = 404 déjà confirmé → invalide
+        $settings = self::readSettings();
+        $cache    = $settings['company_urns'] ?? [];
+        if (array_key_exists($slug, $cache) && $cache[$slug] === '') {
+            return false;
+        }
+
         try {
             $response = Http::timeout(6)
                 ->withHeaders([
-                    // UA crédible pour éviter d'être bloqué avant même d'obtenir un code HTTP
                     'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                                   . 'AppleWebKit/537.36 (KHTML, like Gecko) '
                                   . 'Chrome/124.0.0.0 Safari/537.36',
@@ -861,7 +1075,7 @@ PROMPT;
                 ])
                 ->get("https://www.linkedin.com/company/{$slug}/");
 
-            // 404 = slug inexistant ; tout le reste (200, 302, 999…) → page existe
+            // 404 = slug inexistant ; tout le reste (200, 302, 429, 999…) → page existe
             return $response->status() !== 404;
         } catch (\Throwable $e) {
             // Impossible de vérifier (timeout, réseau…) → on fait confiance à OpenAI
@@ -872,52 +1086,114 @@ PROMPT;
 
     /**
      * Retourne l'URN LinkedIn (urn:li:organization:ID) pour un slug donné.
-     * Vérifie d'abord le cache dans linkedin.json, puis appelle l'API si un token est dispo.
-     * Retourne null si l'URN n'est pas connu (pas de token ou API refusée).
+     *
+     * Ordre de résolution :
+     *   1. Carte statique KNOWN_URNS (aucun appel réseau — instantané)
+     *   2. Cache persistant linkedin.json (résultat d'un scraping précédent)
+     *   3. Scraping de la page LinkedIn (fallback pour les slugs inconnus)
+     *
+     * Règles de cache :
+     *   - "urn:li:organization:..." = URN confirmé
+     *   - ""                        = 404 confirmé (slug inexistant)
+     *   - Absent du cache           = jamais essayé ou erreur temporaire → retry
      */
     private function resolveCompanyUrn(string $slug): ?string
     {
+        // ── 1. Carte statique (permanente, aucun appel réseau) ─────────────────
+        if (isset(self::KNOWN_URNS[$slug])) {
+            return self::KNOWN_URNS[$slug];
+        }
+
+        // ── 2. Cache persistant ────────────────────────────────────────────────
         $settings = self::readSettings();
         $cache    = $settings['company_urns'] ?? [];
-
-        // '' = déjà cherché mais non trouvé ; urn:... = trouvé
         if (array_key_exists($slug, $cache)) {
-            return !empty($cache[$slug]) ? (string) $cache[$slug] : null;
+            $val = $cache[$slug];
+            return !empty($val) ? (string) $val : null;
         }
 
-        if (empty($this->accessToken)) {
-            $cache[$slug] = '';
-            self::writeSettings(['company_urns' => $cache]);
+        // ── 3. Scraping LinkedIn (slug inconnu de la carte statique et du cache) ─
+        return $this->scrapeLinkedInUrn($slug);
+    }
+
+    /**
+     * Scrape la page LinkedIn d'une entreprise pour en extraire l'URN.
+     * Plus fiable que l'API REST qui retourne 403 pour les entreprises qu'on n'admin pas.
+     * Met en cache le résultat dans linkedin.json.
+     */
+    private function scrapeLinkedInUrn(string $slug): ?string
+    {
+        try {
+            $response = Http::timeout(10)
+                ->withHeaders([
+                    'User-Agent'      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                       . 'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                       . 'Chrome/124.0.0.0 Safari/537.36',
+                    'Accept'          => 'text/html,application/xhtml+xml',
+                    'Accept-Language' => 'en-US,en;q=0.9',
+                ])
+                ->get("https://www.linkedin.com/company/{$slug}/");
+
+            $status = $response->status();
+            $body   = $response->body();
+
+            Log::info("LinkedIn URN scrape: '{$slug}' → HTTP {$status}");
+
+            if ($status === 404) {
+                // Slug confirmé inexistant → mettre en cache pour éviter les retry
+                $settings         = self::readSettings();
+                $cache            = $settings['company_urns'] ?? [];
+                $cache[$slug]     = '';
+                self::writeSettings(['company_urns' => $cache]);
+                Log::info("LinkedIn: '{$slug}' → 404 confirmé, mis en cache comme absent");
+                return null;
+            }
+
+            // Extraire l'ID numérique de l'organisation depuis le HTML
+            $orgId = null;
+            if      (preg_match('/"urn:li:(?:fs_)?organization:(\d+)"/', $body, $m))         $orgId = $m[1];
+            elseif  (preg_match('/"entityUrn"\s*:\s*"urn:li:company:(\d+)"/', $body, $m))    $orgId = $m[1];
+            elseif  (preg_match('/data-company-id="(\d+)"/', $body, $m))                     $orgId = $m[1];
+            elseif  (preg_match('/"companyId"\s*:\s*(\d+)/', $body, $m))                     $orgId = $m[1];
+
+            if ($orgId) {
+                $urn      = "urn:li:organization:{$orgId}";
+                $settings = self::readSettings();
+                $cache    = $settings['company_urns'] ?? [];
+                $cache[$slug] = $urn;
+
+                // Extraire aussi le nom officiel pour le cache company_names
+                $officialName = null;
+                if (preg_match('/<title[^>]*>([^<]+)\s*\|\s*LinkedIn<\/title>/i', $body, $nm)) {
+                    $candidate = trim(html_entity_decode($nm[1], ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+                    if (!empty($candidate)) $officialName = $candidate;
+                } elseif (preg_match('/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i', $body, $nm)) {
+                    $candidate = trim(preg_replace('/\s*\|\s*LinkedIn.*$/i', '', html_entity_decode($nm[1], ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+                    if (!empty($candidate)) $officialName = $candidate;
+                }
+
+                $update = ['company_urns' => $cache];
+                if ($officialName) {
+                    $names        = $settings['company_names'] ?? [];
+                    $names[$slug] = $officialName;
+                    $update['company_names'] = $names;
+                    Log::info("LinkedIn: '{$slug}' → URN {$urn}, nom officiel '{$officialName}'");
+                } else {
+                    Log::info("LinkedIn: '{$slug}' → URN scrapé: {$urn}");
+                }
+                self::writeSettings($update);
+                return $urn;
+            }
+
+            // Page existe (200/429/999) mais URN non trouvé dans le HTML.
+            // NE PAS mettre en cache → LinkedIn protège parfois son HTML, retry au prochain post.
+            Log::warning("LinkedIn: '{$slug}' → HTTP {$status} mais URN introuvable dans le HTML");
+            return null;
+
+        } catch (\Throwable $e) {
+            Log::warning("LinkedIn: scraping échoué pour '{$slug}': " . $e->getMessage());
             return null;
         }
-
-        try {
-            $response = Http::timeout(5)
-                ->withToken($this->accessToken)
-                ->withHeaders(['X-Restli-Protocol-Version' => '2.0.0'])
-                ->get('https://api.linkedin.com/v2/organizations', [
-                    'q'          => 'vanityName',
-                    'vanityName' => $slug,
-                    'projection' => '(id)',
-                ]);
-
-            if ($response->successful()) {
-                $elements = $response->json('elements', []);
-                if (!empty($elements[0]['id'])) {
-                    $urn          = 'urn:li:organization:' . $elements[0]['id'];
-                    $cache[$slug] = $urn;
-                    self::writeSettings(['company_urns' => $cache]);
-                    Log::info("LinkedIn: URN résolu pour '{$slug}' → {$urn}");
-                    return $urn;
-                }
-            }
-        } catch (\Throwable $e) {
-            Log::warning("LinkedIn: impossible de résoudre l'URN pour '{$slug}': " . $e->getMessage());
-        }
-
-        $cache[$slug] = ''; // marque comme cherché et non trouvé
-        self::writeSettings(['company_urns' => $cache]);
-        return null;
     }
 
     /**
