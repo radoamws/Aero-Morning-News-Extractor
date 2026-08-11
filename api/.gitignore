@@ -17,3 +17,6 @@ yarn-error.log
 /.fleet
 /.idea
 /.vscode
+# Scripts de debug/test locaux (jamais en prod)
+/test_*.php
+/debug_*.php
