@@ -1065,11 +1065,6 @@ Summary: {$meta}
 Content: {$content}
 PROMPT;
 
-Article title: {$title}
-Summary: {$meta}
-Content: {$content}
-PROMPT;
-
         // ── Appel OpenAI ─────────────────────────────────────────────────────
         // On utilise le modèle rapide (gpt-4o-mini) — simple extraction d'entités
         $model    = env('OPENAI_FALLBACK_MODEL', 'gpt-4o-mini');
