@@ -954,6 +954,10 @@ Airlines & Operators:
 - Cathay Pacific → cathay-pacific
 - easyJet → easyjet
 - Solairus Aviation → solairus-aviation
+- VistaJet → vistajet (if confirmed)
+
+Business aviation / MRO:
+- AerFin → aer-fin
 
 Manufacturers & OEMs:
 - Airbus → airbusgroup
@@ -995,6 +999,7 @@ Rules:
   → Example: "Solairus Aviation" → "solairus-aviation", "VistaJet" → "vistajet"
   → The slug will be verified automatically via HTTP — a wrong slug will simply be rejected
 - Do NOT include AeroMorning (that is our own publication)
+- Do NOT suggest "orix-aviation" (slug does not exist on LinkedIn — ORIX Aviation has no dedicated page)
 - Return ONLY a JSON object, no markdown
 
 Format: {"companies": [{"name": "Official LinkedIn Display Name", "slug": "linkedin-vanity-slug"}]}
@@ -1026,6 +1031,8 @@ PROMPT;
         $companies = array_slice(array_values($companies), 0, 8);
 
         // ── Vérification HTTP de chaque slug LinkedIn ─────────────────────────
+        // Utilise Googlebot UA : retourne 404 pour les slugs inexistants (fiable),
+        // contrairement au Chrome UA qui renvoie 999 même pour de faux slugs.
         $verified = [];
         foreach ($companies as $company) {
             $slug = trim($company['slug']);
@@ -1036,7 +1043,23 @@ PROMPT;
                     'url'  => "https://www.linkedin.com/company/{$slug}/",
                 ];
             } else {
-                Log::info("LinkedIn: slug '{$slug}' rejeté (page introuvable)");
+                Log::info("LinkedIn: slug '{$slug}' rejeté (page introuvable ou 404)");
+            }
+        }
+
+        // ── Pré-résolution des URNs ────────────────────────────────────────────
+        // Buffer bloque la re-publication du même article → l'annotation doit
+        // fonctionner AU PREMIER ESSAI. On résout les URNs ici (lors de la détection)
+        // pour que le cache linkedin.json soit prêt AVANT l'appel à postViaBuffer().
+        // Si la résolution échoue maintenant (429 temporaire), elle sera retentée
+        // automatiquement lors de la publication (resolveCompanyUrn cherche en cache
+        // puis re-scrape si absent).
+        foreach ($verified as $company) {
+            $urn = $this->resolveCompanyUrn($company['slug']);
+            if ($urn) {
+                Log::info("LinkedIn: URN pré-résolu pour '{$company['slug']}' → {$urn}");
+            } else {
+                Log::warning("LinkedIn: URN non résolu pour '{$company['slug']}' à la détection → mention texte brut si non résolu à la publication");
             }
         }
 
