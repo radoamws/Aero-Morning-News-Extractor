@@ -65,8 +65,10 @@ class LinkedInService
         // ── Espace ─────────────────────────────────────────────────────────────
         'spacex'                        => 'SpaceX',
         'arianegroup'                   => 'ArianeGroup',
-        // ── Aviation d'affaires / opérateurs ──────────────────────────────────
+        // ── Aviation d'affaires / MRO / opérateurs ────────────────────────────
         'solairus-aviation'             => 'Solairus Aviation',
+        'aerfin-limited'                => 'AerFin',
+        'orix-aviation-systems-ltd'     => 'ORIX Aviation',
         'easyjet'                       => 'easyJet',           // CASSE OFFICIELLE: minuscule "easy"
         // ── Agences / institutions ─────────────────────────────────────────────
         'easa'                          => 'EASA',
@@ -117,8 +119,10 @@ class LinkedInService
         'emirates'                  => 'urn:li:organization:5042',
         'cathay-pacific'            => 'urn:li:organization:7097',
         'easyjet'                   => 'urn:li:organization:8932',
-        // ── Aviation d'affaires / opérateurs ──────────────────────────────────
-        'solairus-aviation'         => 'urn:li:organization:435016',
+        // ── Aviation d'affaires / MRO / opérateurs ────────────────────────────
+        'solairus-aviation'             => 'urn:li:organization:435016',
+        'aerfin-limited'                => 'urn:li:organization:1293994',
+        'orix-aviation-systems-ltd'     => 'urn:li:organization:5314080',
         // ── Espace ─────────────────────────────────────────────────────────────
         'spacex'                    => 'urn:li:organization:30846',
         'arianegroup'               => 'urn:li:organization:10236541',
@@ -1006,75 +1010,60 @@ PRIORITY RULES (apply in order):
 5. Omit pure subsidiaries with no independent LinkedIn following
 6. Maximum 6 companies — quality over quantity
 
-VERIFIED LINKEDIN SLUGS — use these EXACT values when the company is listed below:
+VERIFIED LINKEDIN SLUGS — use EXACT slug for companies listed:
 eVTOL / AAM / Drones:
-- Archer / Archer Aviation → flyarcher
-- Joby / Joby Aviation → jobyaviation
-- Wisk / Wisk Aero → wisk-aero
-- Volocopter → volocopter
-- SkyGrid → skygrid
-- Insitu → insitu
+  Archer / Archer Aviation → flyarcher | Joby / Joby Aviation → jobyaviation
+  Wisk / Wisk Aero → wisk-aero | Volocopter → volocopter | SkyGrid → skygrid | Insitu → insitu
 
-Airlines & Operators:
-- Korean Air → korean-air
-- Air France → air-france
-- Lufthansa Group → lufthansa-group
-- United Airlines → united-airlines
-- Delta Air Lines → delta-air-lines
-- American Airlines → american-airlines
-- Emirates → emirates
-- Cathay Pacific → cathay-pacific
-- easyJet → easyjet
-- Solairus Aviation → solairus-aviation
-- VistaJet → vistajet (if confirmed)
+Airlines:
+  Korean Air → korean-air | Air France → air-france | Lufthansa Group → lufthansa-group
+  United Airlines → united-airlines | Delta Air Lines → delta-air-lines
+  American Airlines → american-airlines | Emirates → emirates | Cathay Pacific → cathay-pacific
+  easyJet → easyjet
 
-Business aviation / MRO:
-- AerFin → aer-fin
+Aviation services / MRO / operators:
+  Solairus Aviation → solairus-aviation
+  AerFin / AerFin Limited → aerfin-limited
+  ORIX Aviation / ORIX Aviation Systems → orix-aviation-systems-ltd
 
 Manufacturers & OEMs:
-- Airbus → airbusgroup
-- Boeing → boeing
-- Safran → safran
-- Thales → thales
-- Dassault Aviation → dassault-aviation
-- Rolls-Royce → rolls-royce
-- Pratt & Whitney → prattwhitney
-- Honeywell → honeywell
-- Collins Aerospace → collins-aerospace
-- Leonardo → leonardo
-- MBDA → mbda
-- Rheinmetall → rheinmetall
-- Textron → textron
-- Bell / Bell Helicopter → bell
-- MTU Aero Engines → mtu-aero-engines
+  Airbus → airbusgroup | Boeing → boeing | Safran → safran | Thales → thales
+  Dassault Aviation → dassault-aviation | Rolls-Royce → rolls-royce
+  Pratt & Whitney → prattwhitney | Honeywell → honeywell
+  Collins Aerospace → collins-aerospace | Leonardo → leonardo | MBDA → mbda
+  Rheinmetall → rheinmetall | Textron → textron | Bell → bell | MTU Aero Engines → mtu-aero-engines
 
 Defense:
-- Lockheed Martin → lockheed-martin
-- Northrop Grumman → northrop-grumman-corporation
-- RTX / Raytheon → rtx
-- BAE Systems → bae-systems
-- General Dynamics → general-dynamics
-- L3Harris → l3harris-technologies
+  Lockheed Martin → lockheed-martin | Northrop Grumman → northrop-grumman-corporation
+  RTX / Raytheon → rtx | BAE Systems → bae-systems
+  General Dynamics → general-dynamics | L3Harris → l3harris-technologies
 
-Space:
-- SpaceX → spacex
-- ArianeGroup → arianegroup
+Space & agencies:
+  SpaceX → spacex | ArianeGroup → arianegroup | NATO → nato | EASA → easa
 
-Agencies & institutions:
-- NATO → nato
-- EASA → easa
+IMPORTANT — for companies NOT in the list above:
+LinkedIn slugs often include legal suffixes that are NOT in the company's public name.
+You MUST provide 2–3 slug candidates, from most to least likely:
+  → Examples of how LinkedIn slugs work:
+     "Air Lease Corporation" → "air-lease-corporation" (full legal name)
+     "Avolon" → "avolon-aerospace-limited" (with legal suffix)
+     "Aircastle" → "aircastle" (no suffix needed)
+     "Stellex Aerostructures" → "stellex-aerostructures" or "stellex-aerostructures-llc"
+  → Always include the plain slug AND versions with -limited, -ltd, -group, -inc, -corporation
 
-Rules:
-- For companies IN the list above: use the EXACT slug shown — do not invent alternatives
-- For companies NOT in the list: include them ONLY if you are confident about their LinkedIn slug
-  → Use the most likely LinkedIn vanity slug format (e.g. "company-name" or "companyname")
-  → Example: "Solairus Aviation" → "solairus-aviation", "VistaJet" → "vistajet"
-  → The slug will be verified automatically via HTTP — a wrong slug will simply be rejected
-- Do NOT include AeroMorning (that is our own publication)
-- Do NOT suggest "orix-aviation" (slug does not exist on LinkedIn — ORIX Aviation has no dedicated page)
-- Return ONLY a JSON object, no markdown
+Do NOT include AeroMorning (our own publication).
 
-Format: {"companies": [{"name": "Official LinkedIn Display Name", "slug": "linkedin-vanity-slug"}]}
+Return ONLY a valid JSON object (no markdown), with this format:
+{"companies": [
+  {"name": "Official LinkedIn Name", "slug": "best-slug-guess", "slug_alternatives": ["alt1", "alt2"]},
+  {"name": "Airbus", "slug": "airbusgroup", "slug_alternatives": []}
+]}
+slug_alternatives = [] for companies already in the verified list above.
+
+Article title: {$title}
+Summary: {$meta}
+Content: {$content}
+PROMPT;
 
 Article title: {$title}
 Summary: {$meta}
@@ -1105,17 +1094,29 @@ PROMPT;
         // ── Vérification HTTP de chaque slug LinkedIn ─────────────────────────
         // Utilise Googlebot UA : retourne 404 pour les slugs inexistants (fiable),
         // contrairement au Chrome UA qui renvoie 999 même pour de faux slugs.
+        // Pour chaque entreprise, on essaie dans l'ordre :
+        //   1. Le slug principal (fourni par OpenAI ou connu statiquement)
+        //   2. Les alternatives fournies par OpenAI (slug_alternatives)
+        //   3. Des variantes automatiques avec suffixes légaux courants
         $verified = [];
         foreach ($companies as $company) {
-            $slug = trim($company['slug']);
-            if ($this->verifyLinkedInSlug($slug)) {
+            $primarySlug = trim($company['slug']);
+            $alternatives = array_map('trim', $company['slug_alternatives'] ?? []);
+
+            $validSlug = $this->discoverValidSlug($primarySlug, $alternatives);
+
+            if ($validSlug !== null) {
                 $verified[] = [
                     'name' => $company['name'],
-                    'slug' => $slug,
-                    'url'  => "https://www.linkedin.com/company/{$slug}/",
+                    'slug' => $validSlug,
+                    'url'  => "https://www.linkedin.com/company/{$validSlug}/",
                 ];
+                if ($validSlug !== $primarySlug) {
+                    Log::info("LinkedIn: slug substitué '{$primarySlug}' → '{$validSlug}' pour '{$company['name']}'");
+                }
             } else {
-                Log::info("LinkedIn: slug '{$slug}' rejeté (page introuvable ou 404)");
+                Log::info("LinkedIn: aucun slug valide trouvé pour '{$company['name']}' (testé: {$primarySlug}" .
+                    (!empty($alternatives) ? ', ' . implode(', ', $alternatives) : '') . " + variantes auto)");
             }
         }
 
@@ -1148,6 +1149,61 @@ PROMPT;
         ]);
 
         return $verified;
+    }
+
+    /**
+     * Découvre le premier slug LinkedIn valide parmi toutes les possibilités.
+     *
+     * Stratégie (dans l'ordre, s'arrête au premier succès) :
+     *  1. Slug principal (fourni par OpenAI ou KNOWN_URNS)
+     *  2. Alternatives explicites fournies par OpenAI (slug_alternatives)
+     *  3. Variantes automatiques avec suffixes légaux courants :
+     *     -limited, -ltd, -group, -inc, -corporation, -llc,
+     *     -systems, -systems-ltd, -aviation, -aerospace, -services, -solutions
+     *
+     * Retourne le premier slug valide, ou null si aucun ne fonctionne.
+     *
+     * NOTE : pour éviter le rate-limiting LinkedIn entre chaque test HTTP,
+     * on ajoute un délai minimal de 1 s entre les appels réseau.
+     * Les slugs connus (KNOWN_URNS) et les 404 déjà en cache ne font PAS
+     * d'appel réseau → pas de délai.
+     */
+    private function discoverValidSlug(string $primary, array $alternatives = []): ?string
+    {
+        // Tous les candidats à tester dans l'ordre
+        $candidates = array_unique(array_filter(array_merge([$primary], $alternatives)));
+
+        // Suffixes légaux courants ajoutés au slug principal (base = sans le dernier tiret-mot)
+        // Ex : "aerfin" → "aerfin-limited", "aerfin-ltd", …
+        $legalSuffixes = [
+            '-limited', '-ltd', '-group', '-inc', '-corporation', '-llc',
+            '-systems', '-systems-ltd', '-aviation', '-aerospace', '-services', '-solutions',
+        ];
+        foreach ($legalSuffixes as $suffix) {
+            $candidates[] = $primary . $suffix;
+        }
+
+        $needsDelay = false; // On ne met un délai QUE si on fait un appel réseau
+        foreach ($candidates as $slug) {
+            if (isset(self::KNOWN_URNS[$slug])) {
+                return $slug; // Connu statiquement → aucun appel réseau
+            }
+
+            if ($needsDelay) {
+                sleep(1); // Évite le 429 entre appels LinkedIn successifs
+            }
+
+            if ($this->verifyLinkedInSlug($slug)) {
+                return $slug;
+            }
+
+            // verifyLinkedInSlug fait un appel réseau seulement si le slug
+            // n'est ni dans KNOWN_URNS ni dans le cache "404 confirmé".
+            // On pose le délai de toute façon pour les cas réels.
+            $needsDelay = true;
+        }
+
+        return null;
     }
 
     /**
