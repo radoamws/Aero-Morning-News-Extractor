@@ -217,15 +217,22 @@ class LinkedInService
     public function postNews(News $news): array
     {
         $articleUrl = $this->resolveArticleUrl($news);
-        $postText   = $this->buildPostText($news, $articleUrl);
 
-        // Mode Make.com webhook (prioritaire) — permet de poster en tant que page entreprise
+        // 1. Buffer.com (prioritaire) — @mentions cliquables via annotations LinkedIn
+        //    Buffer est un partenaire LinkedIn approuvé → pas besoin de Community Management API
+        if (!empty(env('BUFFER_API_KEY', '')) && !empty(env('BUFFER_LINKEDIN_CHANNEL_ID', ''))) {
+            return $this->postViaBuffer($articleUrl, $news);
+        }
+
+        $postText = $this->buildPostText($news, $articleUrl);
+
+        // 2. Make.com webhook — @Nom en texte brut (non cliquable)
         $makeWebhookUrl = env('LINKEDIN_MAKE_WEBHOOK_URL', '');
         if (!empty($makeWebhookUrl)) {
             return $this->postViaMake($makeWebhookUrl, $news, $postText, $articleUrl);
         }
 
-        // Mode API LinkedIn directe (nécessite w_organization_social pour une page)
+        // 3. API LinkedIn directe (peut nécessiter w_organization_social approuvé)
         if (empty($this->accessToken)) {
             throw new \RuntimeException('Token LinkedIn non configuré. Utilisez le panel "Configuration LinkedIn" du dashboard.');
         }
@@ -426,6 +433,192 @@ class LinkedInService
             'post_id' => $postUrn,
             'url'     => 'https://www.linkedin.com/feed/update/' . rawurlencode($postUrn),
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Buffer.com
+    // -------------------------------------------------------------------------
+
+    /**
+     * Publie la news sur LinkedIn via l'API GraphQL Buffer.
+     * Buffer est un partenaire LinkedIn approuvé : il peut poster sur une page
+     * entreprise sans passer par le Community Management API de LinkedIn.
+     * Les @mentions cliquables sont transmises via le champ metadata.linkedin.annotations.
+     */
+    private function postViaBuffer(string $articleUrl, News $news): array
+    {
+        $apiKey    = env('BUFFER_API_KEY', '');
+        $channelId = env('BUFFER_LINKEDIN_CHANNEL_ID', '');
+
+        $companies   = $this->detectCompanies($news);
+        $postText    = $this->buildBufferPostText($news, $articleUrl, $companies);
+        $annotations = $this->buildBufferAnnotations($postText, $companies);
+
+        // ── LinkedIn metadata (annotations + carte article) ─────────────────
+        // linkAttachment et annotations vont dans metadata.linkedin (pas à la racine)
+        $linkedinMeta = [];
+
+        // LinkAttachmentInput n'accepte que l'URL — Buffer scrappe automatiquement
+        // og:title, og:description et og:image depuis l'article WordPress.
+        $linkedinMeta['linkAttachment'] = ['url' => $articleUrl];
+
+        if (!empty($annotations)) {
+            $linkedinMeta['annotations'] = $annotations;
+        }
+
+        // ── Payload principal ────────────────────────────────────────────────
+        $input = [
+            'channelId'      => $channelId,
+            'text'           => $postText,
+            'schedulingType' => 'automatic',
+            'mode'           => 'shareNow',   // publication immédiate
+            'metadata'       => ['linkedin' => $linkedinMeta],
+        ];
+
+        // ── Mutation GraphQL ─────────────────────────────────────────────────
+        // L'endpoint Buffer est https://api.buffer.com (sans /graphql)
+        // La réponse est un union type : PostActionSuccess | MutationError
+        $mutation = <<<'GQL'
+mutation CreatePost($input: CreatePostInput!) {
+    createPost(input: $input) {
+        ... on PostActionSuccess {
+            post { id text }
+        }
+        ... on MutationError {
+            message
+        }
+    }
+}
+GQL;
+
+        $response = Http::withToken($apiKey)
+            ->asJson()
+            ->timeout(30)
+            ->post('https://api.buffer.com', [
+                'query'     => $mutation,
+                'variables' => ['input' => $input],
+            ]);
+
+        Log::info('LinkedIn via Buffer', [
+            'news_id'     => $news->id,
+            'http_status' => $response->status(),
+            'body'        => $response->body(),
+            'annotations' => count($annotations),
+            'companies'   => array_column($companies, 'name'),
+        ]);
+
+        if (!$response->successful()) {
+            throw new \RuntimeException(
+                "Buffer API error (HTTP {$response->status()}): " . $response->body()
+            );
+        }
+
+        // Erreurs GraphQL de niveau protocole
+        $gqlErrors = $response->json('errors', []);
+        if (!empty($gqlErrors)) {
+            $msg = implode(', ', array_column($gqlErrors, 'message'));
+            throw new \RuntimeException("Buffer GraphQL error: {$msg}");
+        }
+
+        // Union type MutationError
+        $mutError = $response->json('data.createPost.message');
+        if ($mutError && !$response->json('data.createPost.post')) {
+            throw new \RuntimeException("Buffer createPost error: {$mutError}");
+        }
+
+        $postId = $response->json('data.createPost.post.id', 'unknown');
+
+        return [
+            'success'  => true,
+            'post_id'  => $postId,
+            'url'      => 'https://www.linkedin.com/company/4869929/admin/page-posts/published/',
+            'provider' => 'buffer',
+        ];
+    }
+
+    /**
+     * Construit le texte du post pour Buffer/LinkedIn.
+     * Structure : ✈️ Titre \n\n Excerpt \n\n 🔗 URL \n\n @Entreprises \n\n #hashtags
+     */
+    private function buildBufferPostText(News $news, string $articleUrl, array $companies): string
+    {
+        $excerpt  = $this->buildExcerpt($news, 280);
+        $hashtags = $this->buildHashtags($news);
+        $title    = $news->title ?? '';
+
+        $text = "✈️ {$title}\n\n{$excerpt}\n\n🔗 {$articleUrl}";
+
+        if (!empty($companies)) {
+            $mentions = implode(' ', array_map(fn($c) => '@' . $c['name'], $companies));
+            $text .= "\n\n{$mentions}";
+        }
+
+        $text .= "\n\n{$hashtags}";
+
+        return $text;
+    }
+
+    /**
+     * Construit le tableau d'annotations Buffer (LinkedIn @mentions cliquables).
+     * Chaque annotation associe la position UTF-16 de "@Nom" dans le texte à l'URN LinkedIn.
+     * Buffer transmet ces annotations à LinkedIn qui les transforme en mentions cliquables.
+     */
+    private function buildBufferAnnotations(string $text, array $companies): array
+    {
+        if (empty($companies)) {
+            return [];
+        }
+
+        $annotations = [];
+        $searchFrom  = 0; // index Unicode pour éviter de trouver le même @ deux fois
+
+        foreach ($companies as $company) {
+            $urn = $this->resolveCompanyUrn($company['slug']);
+            if (!$urn) {
+                // Pas d'URN LinkedIn → mention en texte brut uniquement, pas d'annotation
+                continue;
+            }
+
+            $mention    = '@' . $company['name'];
+            $unicodePos = mb_strpos($text, $mention, $searchFrom);
+            if ($unicodePos === false) {
+                continue;
+            }
+
+            // Extraire l'ID numérique de l'URN (urn:li:organization:3019636 → "3019636")
+            preg_match('/urn:li:organization:(\d+)/', $urn, $m);
+            $orgId = $m[1] ?? '';
+
+            $annotations[] = [
+                'id'            => $orgId,
+                'entity'        => $urn,
+                'length'        => $this->utf16Len($mention),
+                'link'          => "https://www.linkedin.com/company/{$company['slug']}/",
+                'localizedName' => $company['name'],
+                'start'         => $this->utf16PositionOf($text, $unicodePos),
+                'vanityName'    => $company['slug'],
+            ];
+
+            $searchFrom = $unicodePos + 1;
+        }
+
+        return $annotations;
+    }
+
+    /**
+     * Convertit un index de caractère Unicode (résultat de mb_strpos) en nombre
+     * de code units UTF-16. Buffer/LinkedIn indexent les annotations en UTF-16 :
+     * - Caractères BMP  (U+0000–U+FFFF) : 1 code unit  (ASCII, ✈️ U+2708…)
+     * - Caractères supp (U+10000+)       : 2 code units (🔗 U+1F517, 😀…)
+     */
+    private function utf16PositionOf(string $text, int $unicodeCharIndex): int
+    {
+        $units = 0;
+        for ($i = 0; $i < $unicodeCharIndex; $i++) {
+            $cp    = mb_ord(mb_substr($text, $i, 1));
+            $units += ($cp >= 0x10000) ? 2 : 1;
+        }
+        return $units;
     }
 
     // -------------------------------------------------------------------------
