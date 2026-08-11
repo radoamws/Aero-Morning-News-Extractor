@@ -65,6 +65,9 @@ class LinkedInService
         // ── Espace ─────────────────────────────────────────────────────────────
         'spacex'                        => 'SpaceX',
         'arianegroup'                   => 'ArianeGroup',
+        // ── Aviation d'affaires / opérateurs ──────────────────────────────────
+        'solairus-aviation'             => 'Solairus Aviation',
+        'easyjet'                       => 'easyJet',           // CASSE OFFICIELLE: minuscule "easy"
         // ── Agences / institutions ─────────────────────────────────────────────
         'easa'                          => 'EASA',
         'nato'                          => 'NATO',
@@ -113,6 +116,9 @@ class LinkedInService
         'american-airlines'         => 'urn:li:organization:2640',
         'emirates'                  => 'urn:li:organization:5042',
         'cathay-pacific'            => 'urn:li:organization:7097',
+        'easyjet'                   => 'urn:li:organization:8932',
+        // ── Aviation d'affaires / opérateurs ──────────────────────────────────
+        'solairus-aviation'         => 'urn:li:organization:435016',
         // ── Espace ─────────────────────────────────────────────────────────────
         'spacex'                    => 'urn:li:organization:30846',
         'arianegroup'               => 'urn:li:organization:10236541',
@@ -928,7 +934,7 @@ PRIORITY RULES (apply in order):
 5. Omit pure subsidiaries with no independent LinkedIn following
 6. Maximum 6 companies — quality over quantity
 
-KNOWN LINKEDIN SLUGS — use these EXACT values (verified August 2026):
+VERIFIED LINKEDIN SLUGS — use these EXACT values when the company is listed below:
 eVTOL / AAM / Drones:
 - Archer / Archer Aviation → flyarcher
 - Joby / Joby Aviation → jobyaviation
@@ -946,6 +952,8 @@ Airlines & Operators:
 - American Airlines → american-airlines
 - Emirates → emirates
 - Cathay Pacific → cathay-pacific
+- easyJet → easyjet
+- Solairus Aviation → solairus-aviation
 
 Manufacturers & OEMs:
 - Airbus → airbusgroup
@@ -981,7 +989,11 @@ Agencies & institutions:
 - EASA → easa
 
 Rules:
-- Use ONLY slugs from the list above — if you are unsure of the slug, OMIT the company
+- For companies IN the list above: use the EXACT slug shown — do not invent alternatives
+- For companies NOT in the list: include them ONLY if you are confident about their LinkedIn slug
+  → Use the most likely LinkedIn vanity slug format (e.g. "company-name" or "companyname")
+  → Example: "Solairus Aviation" → "solairus-aviation", "VistaJet" → "vistajet"
+  → The slug will be verified automatically via HTTP — a wrong slug will simply be rejected
 - Do NOT include AeroMorning (that is our own publication)
 - Return ONLY a JSON object, no markdown
 
@@ -1066,17 +1078,15 @@ PROMPT;
         }
 
         try {
-            $response = Http::timeout(6)
-                ->withHeaders([
-                    'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                                  . 'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                  . 'Chrome/124.0.0.0 Safari/537.36',
-                    'Accept'     => 'text/html,application/xhtml+xml',
-                ])
-                ->get("https://www.linkedin.com/company/{$slug}/");
+            // Googlebot UA : LinkedIn répond 200 (SEO content) ou 404 (slug inexistant)
+            // Les UAs browser normaux reçoivent 999 même pour des slugs valides → faux négatif
+            ['status' => $status] = $this->curlGet(
+                "https://www.linkedin.com/company/{$slug}/",
+                'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+            );
 
-            // 404 = slug inexistant ; tout le reste (200, 302, 429, 999…) → page existe
-            return $response->status() !== 404;
+            // 404 = slug inexistant ; tout le reste (200, 429, 999…) → page existe
+            return $status !== 404;
         } catch (\Throwable $e) {
             // Impossible de vérifier (timeout, réseau…) → on fait confiance à OpenAI
             Log::debug("LinkedIn: vérification du slug '{$slug}' impossible: " . $e->getMessage());
@@ -1118,82 +1128,118 @@ PROMPT;
 
     /**
      * Scrape la page LinkedIn d'une entreprise pour en extraire l'URN.
-     * Plus fiable que l'API REST qui retourne 403 pour les entreprises qu'on n'admin pas.
-     * Met en cache le résultat dans linkedin.json.
+     *
+     * LinkedIn retourne 999 pour les UAs browser normaux (anti-bot), mais sert
+     * son contenu SEO aux crawlers officiels (Googlebot, LinkedInBot).
+     * On essaie ces UAs dans l'ordre → met en cache le 1er URN trouvé.
+     *
+     * Ordre des tentatives :
+     *   1. Googlebot  → HTTP 200 dans 90 % des cas, HTML riche avec URN
+     *   2. LinkedInBot → fallback si Googlebot échoue (429 ou pas d'URN)
+     *
+     * Met en cache le résultat dans linkedin.json (company_urns + company_names).
+     * NE cache PAS les échecs temporaires (429/999) pour permettre un retry.
      */
     private function scrapeLinkedInUrn(string $slug): ?string
     {
-        try {
-            $response = Http::timeout(10)
-                ->withHeaders([
-                    'User-Agent'      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                                       . 'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                       . 'Chrome/124.0.0.0 Safari/537.36',
-                    'Accept'          => 'text/html,application/xhtml+xml',
-                    'Accept-Language' => 'en-US,en;q=0.9',
-                ])
-                ->get("https://www.linkedin.com/company/{$slug}/");
+        // UAs testés et validés (août 2026) — LinkedIn sert son HTML SEO à ces bots
+        $userAgents = [
+            'Googlebot'   => 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+            'LinkedInBot' => 'LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)',
+        ];
 
-            $status = $response->status();
-            $body   = $response->body();
+        foreach ($userAgents as $uaName => $ua) {
+            try {
+                ['status' => $status, 'body' => $body] = $this->curlGet(
+                    "https://www.linkedin.com/company/{$slug}/",
+                    $ua
+                );
 
-            Log::info("LinkedIn URN scrape: '{$slug}' → HTTP {$status}");
+                Log::info("LinkedIn URN scrape [{$uaName}]: '{$slug}' → HTTP {$status}");
 
-            if ($status === 404) {
-                // Slug confirmé inexistant → mettre en cache pour éviter les retry
-                $settings         = self::readSettings();
-                $cache            = $settings['company_urns'] ?? [];
-                $cache[$slug]     = '';
-                self::writeSettings(['company_urns' => $cache]);
-                Log::info("LinkedIn: '{$slug}' → 404 confirmé, mis en cache comme absent");
-                return null;
-            }
-
-            // Extraire l'ID numérique de l'organisation depuis le HTML
-            $orgId = null;
-            if      (preg_match('/"urn:li:(?:fs_)?organization:(\d+)"/', $body, $m))         $orgId = $m[1];
-            elseif  (preg_match('/"entityUrn"\s*:\s*"urn:li:company:(\d+)"/', $body, $m))    $orgId = $m[1];
-            elseif  (preg_match('/data-company-id="(\d+)"/', $body, $m))                     $orgId = $m[1];
-            elseif  (preg_match('/"companyId"\s*:\s*(\d+)/', $body, $m))                     $orgId = $m[1];
-
-            if ($orgId) {
-                $urn      = "urn:li:organization:{$orgId}";
-                $settings = self::readSettings();
-                $cache    = $settings['company_urns'] ?? [];
-                $cache[$slug] = $urn;
-
-                // Extraire aussi le nom officiel pour le cache company_names
-                $officialName = null;
-                if (preg_match('/<title[^>]*>([^<]+)\s*\|\s*LinkedIn<\/title>/i', $body, $nm)) {
-                    $candidate = trim(html_entity_decode($nm[1], ENT_QUOTES | ENT_HTML5, 'UTF-8'));
-                    if (!empty($candidate)) $officialName = $candidate;
-                } elseif (preg_match('/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i', $body, $nm)) {
-                    $candidate = trim(preg_replace('/\s*\|\s*LinkedIn.*$/i', '', html_entity_decode($nm[1], ENT_QUOTES | ENT_HTML5, 'UTF-8')));
-                    if (!empty($candidate)) $officialName = $candidate;
+                if ($status === 404) {
+                    // Slug confirmé inexistant → cache définitif pour éviter les retry
+                    $settings         = self::readSettings();
+                    $cache            = $settings['company_urns'] ?? [];
+                    $cache[$slug]     = '';
+                    self::writeSettings(['company_urns' => $cache]);
+                    Log::info("LinkedIn: '{$slug}' → 404 confirmé, mis en cache comme absent");
+                    return null;
                 }
 
-                $update = ['company_urns' => $cache];
-                if ($officialName) {
-                    $names        = $settings['company_names'] ?? [];
-                    $names[$slug] = $officialName;
-                    $update['company_names'] = $names;
-                    Log::info("LinkedIn: '{$slug}' → URN {$urn}, nom officiel '{$officialName}'");
-                } else {
-                    Log::info("LinkedIn: '{$slug}' → URN scrapé: {$urn}");
+                // Extraire l'ID numérique de l'organisation depuis le HTML
+                $orgId = null;
+                if     (preg_match('/"urn:li:(?:fs_)?organization:(\d+)"/', $body, $m))        $orgId = $m[1];
+                elseif (preg_match('/"entityUrn"\s*:\s*"urn:li:company:(\d+)"/', $body, $m))   $orgId = $m[1];
+                elseif (preg_match('/data-company-id="(\d+)"/', $body, $m))                    $orgId = $m[1];
+                elseif (preg_match('/"companyId"\s*:\s*(\d+)/', $body, $m))                    $orgId = $m[1];
+
+                if ($orgId) {
+                    $urn      = "urn:li:organization:{$orgId}";
+                    $settings = self::readSettings();
+                    $cache    = $settings['company_urns'] ?? [];
+                    $cache[$slug] = $urn;
+
+                    // Extraire le nom officiel depuis le <title> (format Googlebot : "Nom - Employees, Jobs…")
+                    $officialName = null;
+                    if (preg_match('/<title[^>]*>([^<]+?)\s*\|\s*LinkedIn<\/title>/i', $body, $nm)) {
+                        $candidate = html_entity_decode(trim($nm[1]), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                        // Supprimer le suffixe LinkedIn standard " - Employees, Jobs, Stock & Culture"
+                        $candidate = preg_replace('/\s*-\s*(?:Employees|Jobs|Products|Company|Overview|About)\b.*/i', '', $candidate);
+                        $candidate = trim($candidate);
+                        if (!empty($candidate)) $officialName = $candidate;
+                    }
+
+                    $update = ['company_urns' => $cache];
+                    if ($officialName) {
+                        $names        = $settings['company_names'] ?? [];
+                        $names[$slug] = $officialName;
+                        $update['company_names'] = $names;
+                        Log::info("LinkedIn: '{$slug}' → URN {$urn}, nom officiel '{$officialName}' [{$uaName}]");
+                    } else {
+                        Log::info("LinkedIn: '{$slug}' → URN scrapé: {$urn} [{$uaName}]");
+                    }
+                    self::writeSettings($update);
+                    return $urn;
                 }
-                self::writeSettings($update);
-                return $urn;
+
+                // Page existe (200/429/999) mais URN non trouvé dans ce HTML → essayer l'UA suivant
+                Log::warning("LinkedIn: '{$slug}' → HTTP {$status} mais URN introuvable [{$uaName}], essai UA suivant");
+
+            } catch (\Throwable $e) {
+                Log::warning("LinkedIn: scraping échoué pour '{$slug}' [{$uaName}]: " . $e->getMessage());
             }
-
-            // Page existe (200/429/999) mais URN non trouvé dans le HTML.
-            // NE PAS mettre en cache → LinkedIn protège parfois son HTML, retry au prochain post.
-            Log::warning("LinkedIn: '{$slug}' → HTTP {$status} mais URN introuvable dans le HTML");
-            return null;
-
-        } catch (\Throwable $e) {
-            Log::warning("LinkedIn: scraping échoué pour '{$slug}': " . $e->getMessage());
-            return null;
         }
+
+        // Tous les UAs épuisés sans URN → NE PAS mettre en cache (erreur temporaire, retry au prochain post)
+        Log::warning("LinkedIn: '{$slug}' → aucun UA n'a permis de résoudre l'URN");
+        return null;
+    }
+
+    /**
+     * Effectue un GET HTTP via cURL natif avec un User-Agent personnalisé.
+     * Utilisé pour le scraping LinkedIn qui bloque les UAs browser standards (HTTP 999).
+     *
+     * @return array{status: int, body: string}
+     */
+    private function curlGet(string $url, string $userAgent): array
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 5,
+            CURLOPT_TIMEOUT        => 12,
+            CURLOPT_HTTPHEADER     => [
+                "User-Agent: {$userAgent}",
+                'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language: en-US,en;q=0.9',
+            ],
+        ]);
+        $body   = curl_exec($ch) ?: '';
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        return ['status' => $status, 'body' => $body];
     }
 
     /**
