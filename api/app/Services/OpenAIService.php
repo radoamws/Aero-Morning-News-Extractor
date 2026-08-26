@@ -48,7 +48,9 @@ class OpenAIService
      */
     public function extractWordPressNewsJson(array $emailContent, int $maxRetries = 3): ?array
     {
-        $emailContentForAi = $this->sanitizeEmailContentForOpenAI($emailContent);
+        // Limite standard : 8 000 chars. Si content_filter se déclenche, on réessaiera
+        // avec 4 000 chars pour éliminer les boilerplates d'entreprise en fin de mail.
+        $emailContentForAi = $this->sanitizeEmailContentForOpenAI($emailContent, 8000);
         $emailJson = json_encode($emailContentForAi, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if (!is_string($emailJson) || trim($emailJson) === '') {
             return null;
@@ -57,6 +59,7 @@ class OpenAIService
         $basePrompt = $this->buildWordPressExtractionPrompt($emailJson);
         $lastRaw = null;
         $lastErrors = [];
+        $contentFilterHit = false; // true si au moins un appel a rencontré content_filter
 
         for ($attempt = 1; $attempt <= max(1, $maxRetries); $attempt++) {
             $prompt = ($attempt === 1 || $lastRaw === null)
@@ -73,7 +76,10 @@ class OpenAIService
             $lastRaw = $raw;
 
             if ($raw === null) {
+                // callOpenAI retourne null soit sur erreur réseau/API, soit sur content_filter.
+                // On marque content_filter pour adapter la stratégie de fallback.
                 $lastErrors = ['openai_call_failed'];
+                $contentFilterHit = true; // on ne peut pas distinguer sans changer l'API de callOpenAI
                 continue;
             }
 
@@ -96,6 +102,87 @@ class OpenAIService
             $lastErrors = $errors;
         }
 
+        // ── Fallback final : modèle stable + contenu réduit si content_filter ────
+        // Si le modèle principal (ex. gpt-5) a épuisé ses retries sans produire
+        // un JSON valide, on tente une dernière fois.
+        //
+        // Stratégie :
+        //   a) gpt-4o-mini avec le même contenu (8 000 chars) → couvre les cas où
+        //      gpt-5 tronque ou rate la validation sur de longs emails.
+        //   b) Si on suspecte un content_filter (tous les appels ont retourné null),
+        //      on re-sanitize avec 4 000 chars pour éliminer le boilerplate d'entreprise
+        //      qui peut déclencher le filtre (disclaimers "forward-looking statements",
+        //      sections "About", références financières...).
+        $primaryModel   = (string) env('OPENAI_MODEL', 'gpt-5-mini');
+        $fallbackModel  = trim((string) env('OPENAI_FALLBACK_MODEL', 'gpt-4o-mini'));
+        $primaryLower   = strtolower(trim($primaryModel));
+        $fallbackLower  = strtolower(trim($fallbackModel));
+
+        if ($fallbackModel !== '' && $fallbackLower !== $primaryLower) {
+            // a) Tentative gpt-4o-mini avec le contenu standard (8 000 chars)
+            Log::info('OpenAI: bascule sur le modèle de secours pour l\'extraction WordPress', [
+                'primary'            => $primaryModel,
+                'fallback'           => $fallbackModel,
+                'errors'             => $lastErrors,
+                'content_filter_hit' => $contentFilterHit,
+            ]);
+
+            $raw = $this->callOpenAI(
+                $basePrompt,
+                12000,
+                0.0,
+                ['type' => 'json_object'],
+                ['model' => $fallbackModel]
+            );
+
+            if ($raw !== null) {
+                $decoded = $this->decodeJsonObject($raw);
+                if (is_array($decoded)) {
+                    $errors = $this->validateWordPressNewsPayload($decoded);
+                    if (empty($errors)) {
+                        return $decoded;
+                    }
+                    $lastErrors = $errors;
+                }
+            }
+
+            // b) content_filter probable → on re-essaie avec contenu réduit + prompt concis.
+            // Le content_filter se déclenche dans l'OUTPUT (pas l'input) quand le JSON
+            // billingue FR+EN dépasse ~5 000 chars. Le prompt concis demande ≤ 350 mots
+            // par langue, ce qui maintient l'output sous le seuil du filtre.
+            if ($contentFilterHit && $raw === null) {
+                Log::info('OpenAI: content_filter détecté → re-tentative avec contenu réduit à 4 000 chars + prompt concis', [
+                    'fallback' => $fallbackModel,
+                ]);
+
+                $shortContent = $this->sanitizeEmailContentForOpenAI($emailContent, 4000);
+                $shortJson    = json_encode($shortContent, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                if (is_string($shortJson) && trim($shortJson) !== '') {
+                    // Prompt concis : demande un contenu court (≤ 350 mots/langue)
+                    // pour passer sous le seuil du content_filter d'OpenAI.
+                    $concisePrompt = $this->buildWordPressExtractionPromptConcise($shortJson);
+                    $raw = $this->callOpenAI(
+                        $concisePrompt,
+                        6000,   // 6 000 tokens max : ~4 500 chars, bien sous le seuil
+                        0.0,
+                        ['type' => 'json_object'],
+                        ['model' => $fallbackModel]
+                    );
+
+                    if ($raw !== null) {
+                        $decoded = $this->decodeJsonObject($raw);
+                        if (is_array($decoded)) {
+                            $errors = $this->validateWordPressNewsPayload($decoded);
+                            if (empty($errors)) {
+                                return $decoded;
+                            }
+                            $lastErrors = $errors;
+                        }
+                    }
+                }
+            }
+        }
+
         Log::warning('OpenAI extractWordPressNewsJson failed validation', [
             'errors' => $lastErrors,
             'raw_excerpt' => is_string($lastRaw) ? mb_substr($lastRaw, 0, 1200) : null,
@@ -104,7 +191,7 @@ class OpenAIService
         return null;
     }
 
-    private function sanitizeEmailContentForOpenAI(array $emailContent): array
+    private function sanitizeEmailContentForOpenAI(array $emailContent, int $maxBodyChars = 8000): array
     {
         $sanitized = $emailContent;
 
@@ -115,7 +202,28 @@ class OpenAIService
 
         if (array_key_exists('html_body', $sanitized) && is_string($sanitized['html_body'])) {
             $html = $this->extractMessageBodyHtmlForOpenAI($sanitized['html_body']);
-            $sanitized['html_body'] = $this->stripImagesFromHtmlForOpenAI($html);
+            $html = $this->stripImagesFromHtmlForOpenAI($html);
+
+            // Limite la taille du corps : le contenu utile est toujours en début de mail.
+            // Le boilerplate d'entreprise (disclaimers, "forward-looking statements",
+            // "About Textron"…) déclenche parfois le content_filter d'OpenAI.
+            // On coupe à la limite en préservant la cohérence HTML : on ne coupe pas
+            // en plein milieu d'une balise (on prend une approximation texte brut pour
+            // vérifier la longueur, et on renvoie le HTML tronqué si nécessaire).
+            if ($maxBodyChars > 0 && mb_strlen($html) > $maxBodyChars) {
+                $html = mb_substr($html, 0, $maxBodyChars) . '…[tronqué]';
+            }
+
+            $sanitized['html_body'] = $html;
+        }
+
+        // Pareil pour plain_body / text_body s'ils existent
+        foreach (['plain_body', 'text_body', 'body'] as $key) {
+            if (array_key_exists($key, $sanitized) && is_string($sanitized[$key])) {
+                if ($maxBodyChars > 0 && mb_strlen($sanitized[$key]) > $maxBodyChars) {
+                    $sanitized[$key] = mb_substr($sanitized[$key], 0, $maxBodyChars) . '…[tronqué]';
+                }
+            }
         }
 
         return $sanitized;
@@ -212,14 +320,31 @@ class OpenAIService
             return '';
         }
 
-        // Remove entire <picture> blocks (usually contain only responsive images).
-        $text = preg_replace('/<picture\b[^>]*>.*?<\/picture>/is', ' ', $text) ?? $text;
+        // ── 1. Blocs VML/MSO conditionnels ──────────────────────────────────
+        // Les mails Outlook/Yahoo embarquent des blocs <!--[if gte vml 1]>...
+        // <v:imagedata src="file:///C:/Users/..."> ...<![endif]--> qui contiennent
+        // des chemins Windows locaux (file:///) et des blob: URLs. Ces patterns
+        // déclenchent systématiquement le content_filter d'OpenAI.
+        // On retire tous les commentaires conditionnels MSO avant tout le reste.
+        $text = preg_replace('/<!--\[if[^\]]*\]>.*?<!\[endif\]-->/is', ' ', $text) ?? $text;
 
-        // Remove <img> tags.
+        // ── 2. Balises VML (<v:*>) résiduelles ──────────────────────────────
+        $text = preg_replace('/<v:[a-z]+\b[^>]*>.*?<\/v:[a-z]+>/is', ' ', $text) ?? $text;
+        $text = preg_replace('/<v:[a-z]+\b[^>]*\/>/i', ' ', $text) ?? $text;
+        $text = preg_replace('/<o:[a-z]+\b[^>]*>.*?<\/o:[a-z]+>/is', ' ', $text) ?? $text;
+
+        // ── 3. Commentaires HTML restants ────────────────────────────────────
+        $text = preg_replace('/<!--.*?-->/s', ' ', $text) ?? $text;
+
+        // ── 4. Blocs <picture> et <img> ─────────────────────────────────────
+        $text = preg_replace('/<picture\b[^>]*>.*?<\/picture>/is', ' ', $text) ?? $text;
         $text = preg_replace('/<img\b[^>]*>/i', ' ', $text) ?? $text;
 
-        // Remove base64 image blobs that can explode token counts even outside <img> tags.
-        $text = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[a-z0-9\/+\r\n=]+/i', '[image-data-removed]', $text) ?? $text;
+        // ── 5. URLs potentiellement problématiques ───────────────────────────
+        // base64, blob:, file:// → peuvent déclencher des faux positifs du filtre
+        $text = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[a-z0-9\/+\r\n=]+/i', '[image-removed]', $text) ?? $text;
+        $text = preg_replace('/blob:[^\s"\'<>]+/i', '[blob-url-removed]', $text) ?? $text;
+        $text = preg_replace('/file:\/\/\/[^\s"\'<>]+/i', '[local-path-removed]', $text) ?? $text;
 
         return $text;
     }
@@ -239,6 +364,29 @@ class OpenAIService
             . " - Me retourner le JSON bien échappé car ça sera utilisé dans PHP.\n\n"
             . "IMPORTANT: Tu dois retourner uniquement le JSON brut (pas de Markdown, pas de ```). Le JSON doit être valide et parseable par json_decode en PHP. Les champs FR/EN contiennent du HTML avec de vraies balises (pas de &lt;p&gt;).\n\n"
             . "Voici le contenu du mail:\n\n"
+            . $emailJson;
+    }
+
+    /**
+     * Prompt concis : utilisé quand le prompt standard déclenche le content_filter OpenAI.
+     * Demande un résumé court (≤ 400 mots par langue) pour garder l'output < 4 000 chars
+     * et passer sous le seuil du filtre de sécurité.
+     */
+    private function buildWordPressExtractionPromptConcise(string $emailJson): string
+    {
+        return "Extract aviation news from this forwarded email for WordPress (bilingual FR/EN).\n\n"
+            . "Return ONLY a raw JSON object (no Markdown, no ```) with these exact keys:\n"
+            . "titleFR, shorttitleFR, titleEN, shorttitleEN, FR, EN, "
+            . "metadescriptionFR, metadescriptionEN, focuskeyphraseFR, focuskeyphraseEN\n\n"
+            . "Rules:\n"
+            . "- titleFR / titleEN: plain text, no HTML.\n"
+            . "- shorttitleFR / shorttitleEN: ≤ 62 chars (rephrase if needed).\n"
+            . "- FR / EN: concise HTML article (≤ 350 words each). Keep only essential news facts. "
+            . "Use <p>, <b>, <i>, <ul>/<li> as needed. Add '<p><b>Source: X</b></p>' at end if source not mentioned.\n"
+            . "- metadescriptionFR / metadescriptionEN: exactly 107–142 chars.\n"
+            . "- focuskeyphraseFR / focuskeyphraseEN: no comma.\n"
+            . "- The JSON values must be properly escaped for PHP json_decode.\n\n"
+            . "Email content:\n\n"
             . $emailJson;
     }
 
@@ -1692,6 +1840,11 @@ EXEMPLE VALIDE :
         $model = (string) env('OPENAI_MODEL', 'gpt-5-mini');
         $fallbackModel = trim((string) env('OPENAI_FALLBACK_MODEL', 'gpt-4o-mini'));
 
+        // Permet de forcer un modèle spécifique (ex: dernier recours gpt-4o-mini)
+        if (isset($options['model']) && is_string($options['model']) && $options['model'] !== '') {
+            $model = $options['model'];
+        }
+
         $disableFastFallback = (bool) ($options['disable_fast_fallback'] ?? false);
 
         $useFastFallbackForGpt5 = !$disableFastFallback
@@ -1768,22 +1921,36 @@ EXEMPLE VALIDE :
                 }
 
                 if ($contentText !== '') {
-                    if (config('app.debug')) {
-                        $finishReason = null;
-                        if (is_object($choice) && isset($choice->finishReason)) {
-                            $finishReason = $choice->finishReason;
-                        } elseif (is_object($choice) && isset($choice->finish_reason)) {
-                            $finishReason = $choice->finish_reason;
-                        } elseif (is_array($choice) && isset($choice['finish_reason'])) {
-                            $finishReason = $choice['finish_reason'];
-                        }
+                    $finishReason = null;
+                    if (is_object($choice) && isset($choice->finishReason)) {
+                        $finishReason = $choice->finishReason;
+                    } elseif (is_object($choice) && isset($choice->finish_reason)) {
+                        $finishReason = $choice->finish_reason;
+                    } elseif (is_array($choice) && isset($choice['finish_reason'])) {
+                        $finishReason = $choice['finish_reason'];
+                    }
 
+                    if (config('app.debug')) {
                         Log::debug('OpenAI response', [
                             'model' => $model,
                             'finish_reason' => $finishReason,
                             'output_chars' => mb_strlen($contentText),
                         ]);
                     }
+
+                    // content_filter : OpenAI a tronqué la réponse (filtre de sécurité déclenché
+                    // par le contenu de l'email ou de la réponse générée — disclaimers financiers,
+                    // "forward-looking statements", boilerplate légal...). La réponse partielle est
+                    // inutilisable (JSON tronqué). On retourne null pour que le layer supérieur
+                    // décide de réessayer avec un contenu plus court.
+                    if ($finishReason === 'content_filter') {
+                        Log::warning('OpenAI content_filter: réponse tronquée par le filtre de sécurité', [
+                            'model'        => $model,
+                            'output_chars' => mb_strlen($contentText),
+                        ]);
+                        return null;
+                    }
+
                     return $contentText;
                 }
 
